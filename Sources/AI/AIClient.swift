@@ -399,7 +399,7 @@ public struct FileParserPlugin: Codable, Sendable {
 // MARK: - Tool Calling Models
 
 /// Function definition for tool calling
-public struct ToolFunction: Sendable {
+public struct ToolFunction: @unchecked Sendable {
     public let name: String
     public let description: String?
     public let parameters: [String: Any]?
