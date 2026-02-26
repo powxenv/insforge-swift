@@ -65,6 +65,9 @@ public actor AIClient {
     ///   - webSearch: Web search plugin configuration
     ///   - fileParser: File parser plugin configuration for PDFs
     ///   - thinking: Enable extended reasoning capabilities (Anthropic models only)
+    ///   - tools: Array of tool definitions for function calling
+    ///   - toolChoice: Controls which tool the model should call
+    ///   - parallelToolCalls: Allow model to call multiple tools in parallel
     public func chatCompletion(
         model: String,
         messages: [ChatMessage],
@@ -75,7 +78,10 @@ public actor AIClient {
         systemPrompt: String? = nil,
         webSearch: WebSearchPlugin? = nil,
         fileParser: FileParserPlugin? = nil,
-        thinking: Bool? = nil
+        thinking: Bool? = nil,
+        tools: [Tool]? = nil,
+        toolChoice: ToolChoice? = nil,
+        parallelToolCalls: Bool? = nil
     ) async throws -> ChatCompletionResponse {
         let endpoint = url.appendingPathComponent("chat/completion")
 
@@ -105,6 +111,15 @@ public actor AIClient {
         }
         if let thinking = thinking {
             body["thinking"] = thinking
+        }
+        if let tools = tools {
+            body["tools"] = tools.map { $0.toDictionary() }
+        }
+        if let toolChoice = toolChoice {
+            body["toolChoice"] = toolChoice.toValue()
+        }
+        if let parallelToolCalls = parallelToolCalls {
+            body["parallelToolCalls"] = parallelToolCalls
         }
 
         let data = try JSONSerialization.data(withJSONObject: body)
@@ -381,6 +396,88 @@ public struct FileParserPlugin: Codable, Sendable {
     }
 }
 
+// MARK: - Tool Calling Models
+
+/// Function definition for tool calling
+public struct ToolFunction: Sendable {
+    public let name: String
+    public let description: String?
+    public let parameters: [String: Any]?
+
+    public init(name: String, description: String? = nil, parameters: [String: Any]? = nil) {
+        self.name = name
+        self.description = description
+        self.parameters = parameters
+    }
+
+    func toDictionary() -> [String: Any] {
+        var dict: [String: Any] = ["name": name]
+        if let description = description {
+            dict["description"] = description
+        }
+        if let parameters = parameters {
+            dict["parameters"] = parameters
+        }
+        return dict
+    }
+}
+
+/// Tool definition wrapping a function
+public struct Tool: Sendable {
+    public let type: String
+    public let function: ToolFunction
+
+    public init(type: String = "function", function: ToolFunction) {
+        self.type = type
+        self.function = function
+    }
+
+    func toDictionary() -> [String: Any] {
+        [
+            "type": type,
+            "function": function.toDictionary()
+        ]
+    }
+}
+
+/// Function details within a tool call response
+public struct ToolCallFunction: Codable, Sendable {
+    public let name: String
+    public let arguments: String
+}
+
+/// Tool call made by the model
+public struct ToolCall: Codable, Sendable {
+    public let id: String
+    public let type: String
+    public let function: ToolCallFunction
+}
+
+/// Controls which tool the model should call
+public enum ToolChoice: Sendable {
+    /// Model decides whether to call a tool (default)
+    case auto
+    /// Model will not call any tool
+    case none
+    /// Model must call at least one tool
+    case required
+    /// Model must call the specified function
+    case function(name: String)
+
+    func toValue() -> Any {
+        switch self {
+        case .auto:
+            return "auto"
+        case .none:
+            return "none"
+        case .required:
+            return "required"
+        case .function(let name):
+            return ["type": "function", "function": ["name": name]]
+        }
+    }
+}
+
 // MARK: - Chat Models
 
 // MARK: Multimodal Content Types
@@ -555,30 +652,69 @@ public enum MessageContent: Sendable {
 public struct ChatMessage: Sendable {
     public let role: Role
     public let content: MessageContent
+    public let toolCalls: [ToolCall]?
+    public let toolCallId: String?
 
     public enum Role: String, Codable, Sendable {
         case user
         case assistant
         case system
+        case tool
     }
 
     /// Create a simple text message
     public init(role: Role, content: String) {
         self.role = role
         self.content = .text(content)
+        self.toolCalls = nil
+        self.toolCallId = nil
     }
 
     /// Create a multimodal message with content parts
     public init(role: Role, content: [ContentPart]) {
         self.role = role
         self.content = .parts(content)
+        self.toolCalls = nil
+        self.toolCallId = nil
+    }
+
+    /// Create a tool response message
+    public init(role: Role = .tool, toolCallId: String, content: String) {
+        self.role = role
+        self.content = .text(content)
+        self.toolCalls = nil
+        self.toolCallId = toolCallId
+    }
+
+    /// Create an assistant message with tool calls
+    public init(role: Role = .assistant, content: String, toolCalls: [ToolCall]) {
+        self.role = role
+        self.content = .text(content)
+        self.toolCalls = toolCalls
+        self.toolCallId = nil
     }
 
     func toDictionary() -> [String: Any] {
-        [
+        var dict: [String: Any] = [
             "role": role.rawValue,
             "content": content.toValue()
         ]
+        if let toolCalls = toolCalls {
+            dict["tool_calls"] = toolCalls.map { call in
+                [
+                    "id": call.id,
+                    "type": call.type,
+                    "function": [
+                        "name": call.function.name,
+                        "arguments": call.function.arguments
+                    ]
+                ] as [String: Any]
+            }
+        }
+        if let toolCallId = toolCallId {
+            dict["tool_call_id"] = toolCallId
+        }
+        return dict
     }
 }
 
@@ -586,11 +722,13 @@ public struct ChatMessage: Sendable {
 public struct ChatCompletionResponse: Codable, Sendable {
     public let text: String
     public let annotations: [UrlCitationAnnotation]?
+    public let toolCalls: [ToolCall]?
     public let metadata: Metadata?
 
     enum CodingKeys: String, CodingKey {
         case text
         case annotations
+        case toolCalls = "tool_calls"
         case metadata
     }
 
