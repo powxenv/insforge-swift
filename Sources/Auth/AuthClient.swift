@@ -112,10 +112,26 @@ public actor AuthClient {
         headers: [String: String],
         options: AuthOptions = AuthOptions()
     ) {
+        self.init(
+            url: url,
+            authComponent: authComponent,
+            headers: headers,
+            httpClient: HTTPClient(),
+            options: options
+        )
+    }
+
+    init(
+        url: URL,
+        authComponent: URL,
+        headers: [String: String],
+        httpClient: HTTPClient,
+        options: AuthOptions = AuthOptions()
+    ) {
         self.url = url
         self.authComponent = authComponent
         self.headers = headers
-        self.httpClient = HTTPClient()
+        self.httpClient = httpClient
         self.storage = options.storage
         self.autoRefreshToken = options.autoRefreshToken
         self.clientType = options.clientType
