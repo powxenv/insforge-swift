@@ -148,13 +148,13 @@ public actor DatabaseClient {
 ///
 /// Provides a fluent interface for constructing and executing database queries.
 /// Supports filtering, ordering, pagination, and CRUD operations.
-public struct QueryBuilder: Sendable {
+public struct QueryBuilder: Sendable, HTTPRequestExecutable {
     private let url: URL
     private let headersProvider: LockIsolated<[String: String]>
-    private let httpClient: HTTPClient
+    let httpClient: HTTPClient
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
-    private let tokenRefreshHandler: (any TokenRefreshHandler)?
+    let tokenRefreshHandler: (any TokenRefreshHandler)?
     private var queryItems: [URLQueryItem] = []
     private var preferHeader: String?
     private var countOption: CountOption?
@@ -214,31 +214,6 @@ public struct QueryBuilder: Sendable {
         builder.head = head
         builder.countOption = count
         return builder
-    }
-
-    /// Helper to execute HTTP request with optional auto-refresh
-    private func executeRequest(
-        _ method: HTTPMethod,
-        url: URL,
-        headers: [String: String],
-        body: Data? = nil
-    ) async throws -> HTTPResponse {
-        if let handler = tokenRefreshHandler {
-            return try await httpClient.executeWithAutoRefresh(
-                method,
-                url: url,
-                headers: headers,
-                body: body,
-                refreshHandler: handler
-            )
-        } else {
-            return try await httpClient.execute(
-                method,
-                url: url,
-                headers: headers,
-                body: body
-            )
-        }
     }
 
     /// Filters by equality.
@@ -622,14 +597,14 @@ public struct QueryBuilder: Sendable {
 /// Builder for executing PostgreSQL RPC (Remote Procedure Call) functions.
 ///
 /// Provides a simple interface for calling database functions with optional parameters.
-public struct RPCBuilder: Sendable {
+public struct RPCBuilder: Sendable, HTTPRequestExecutable {
     private let url: URL
     private let headersProvider: LockIsolated<[String: String]>
-    private let httpClient: HTTPClient
+    let httpClient: HTTPClient
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
     private let argsData: Data?
-    private let tokenRefreshHandler: (any TokenRefreshHandler)?
+    let tokenRefreshHandler: (any TokenRefreshHandler)?
 
     /// Logger for debug output
     private var logger: Logging.Logger { InsForgeLoggerFactory.shared }
@@ -660,31 +635,6 @@ public struct RPCBuilder: Sendable {
             self.argsData = nil
         }
         self.tokenRefreshHandler = tokenRefreshHandler
-    }
-
-    /// Helper to execute HTTP request with optional auto-refresh
-    private func executeRequest(
-        _ method: HTTPMethod,
-        url: URL,
-        headers: [String: String],
-        body: Data? = nil
-    ) async throws -> HTTPResponse {
-        if let handler = tokenRefreshHandler {
-            return try await httpClient.executeWithAutoRefresh(
-                method,
-                url: url,
-                headers: headers,
-                body: body,
-                refreshHandler: handler
-            )
-        } else {
-            return try await httpClient.execute(
-                method,
-                url: url,
-                headers: headers,
-                body: body
-            )
-        }
     }
 
     // MARK: - Execute

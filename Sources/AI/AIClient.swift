@@ -3,11 +3,11 @@ import InsForgeCore
 import Logging
 
 /// AI client for chat and image generation
-public actor AIClient {
+public actor AIClient: HTTPRequestExecutable {
     private let url: URL
     private let headersProvider: LockIsolated<[String: String]>
-    private let httpClient: HTTPClient
-    private let tokenRefreshHandler: (any TokenRefreshHandler)?
+    nonisolated let httpClient: HTTPClient
+    nonisolated let tokenRefreshHandler: (any TokenRefreshHandler)?
     private var logger: Logging.Logger { InsForgeLoggerFactory.shared }
 
     /// Get current headers (dynamically fetched to reflect auth state changes)
@@ -24,31 +24,6 @@ public actor AIClient {
         self.headersProvider = headersProvider
         self.httpClient = HTTPClient()
         self.tokenRefreshHandler = tokenRefreshHandler
-    }
-
-    /// Helper to execute HTTP request with optional auto-refresh
-    private func executeRequest(
-        _ method: HTTPMethod,
-        url: URL,
-        headers: [String: String],
-        body: Data? = nil
-    ) async throws -> HTTPResponse {
-        if let handler = tokenRefreshHandler {
-            return try await httpClient.executeWithAutoRefresh(
-                method,
-                url: url,
-                headers: headers,
-                body: body,
-                refreshHandler: handler
-            )
-        } else {
-            return try await httpClient.execute(
-                method,
-                url: url,
-                headers: headers,
-                body: body
-            )
-        }
     }
 
     // MARK: - Chat Completion

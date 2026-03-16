@@ -102,11 +102,11 @@ public struct DownloadStrategy: Codable, Sendable {
 // MARK: - Storage Client
 
 /// Storage client for managing buckets and files
-public actor StorageClient {
+public actor StorageClient: HTTPRequestExecutable {
     private let url: URL
     private let headersProvider: LockIsolated<[String: String]>
-    private let httpClient: HTTPClient
-    private let tokenRefreshHandler: (any TokenRefreshHandler)?
+    nonisolated let httpClient: HTTPClient
+    nonisolated let tokenRefreshHandler: (any TokenRefreshHandler)?
     private var logger: Logging.Logger { InsForgeLoggerFactory.shared }
 
     /// Get current headers (dynamically fetched to reflect auth state changes)
@@ -123,31 +123,6 @@ public actor StorageClient {
         self.headersProvider = headersProvider
         self.httpClient = HTTPClient()
         self.tokenRefreshHandler = tokenRefreshHandler
-    }
-
-    /// Helper to execute HTTP request with optional auto-refresh
-    private func executeRequest(
-        _ method: HTTPMethod,
-        url: URL,
-        headers: [String: String],
-        body: Data? = nil
-    ) async throws -> HTTPResponse {
-        if let handler = tokenRefreshHandler {
-            return try await httpClient.executeWithAutoRefresh(
-                method,
-                url: url,
-                headers: headers,
-                body: body,
-                refreshHandler: handler
-            )
-        } else {
-            return try await httpClient.execute(
-                method,
-                url: url,
-                headers: headers,
-                body: body
-            )
-        }
     }
 
     /// Get a file API reference for a bucket
@@ -333,12 +308,12 @@ public actor StorageClient {
 // MARK: - Storage File API
 
 /// Storage file operations for a specific bucket
-public struct StorageFileApi: Sendable {
+public struct StorageFileApi: Sendable, HTTPRequestExecutable {
     private let bucketId: String
     private let url: URL
     private let headersProvider: LockIsolated<[String: String]>
-    private let httpClient: HTTPClient
-    private let tokenRefreshHandler: (any TokenRefreshHandler)?
+    let httpClient: HTTPClient
+    let tokenRefreshHandler: (any TokenRefreshHandler)?
     private var logger: Logging.Logger { InsForgeLoggerFactory.shared }
 
     /// Get current headers (dynamically fetched to reflect auth state changes)
@@ -358,31 +333,6 @@ public struct StorageFileApi: Sendable {
         self.headersProvider = headersProvider
         self.httpClient = httpClient
         self.tokenRefreshHandler = tokenRefreshHandler
-    }
-
-    /// Helper to execute HTTP request with optional auto-refresh
-    private func executeRequest(
-        _ method: HTTPMethod,
-        url: URL,
-        headers: [String: String],
-        body: Data? = nil
-    ) async throws -> HTTPResponse {
-        if let handler = tokenRefreshHandler {
-            return try await httpClient.executeWithAutoRefresh(
-                method,
-                url: url,
-                headers: headers,
-                body: body,
-                refreshHandler: handler
-            )
-        } else {
-            return try await httpClient.execute(
-                method,
-                url: url,
-                headers: headers,
-                body: body
-            )
-        }
     }
 
     // MARK: - Upload
