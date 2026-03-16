@@ -1074,6 +1074,13 @@ public actor AuthClient {
     private func getAuthHeaders() async throws -> [String: String] {
         // First try in-memory token
         if let token = currentAccessToken {
+            if try await proactivelyRefreshIfNeeded(accessToken: token) {
+                guard let refreshedToken = currentAccessToken else {
+                    throw InsForgeError.authenticationRequired
+                }
+                return headers.merging(["Authorization": "Bearer \(refreshedToken)"]) { $1 }
+            }
+
             return headers.merging(["Authorization": "Bearer \(token)"]) { $1 }
         }
 
@@ -1083,7 +1090,65 @@ public actor AuthClient {
         }
 
         currentAccessToken = session.accessToken
+        if try await proactivelyRefreshIfNeeded(accessToken: session.accessToken, session: session) {
+            guard let refreshedToken = currentAccessToken else {
+                throw InsForgeError.authenticationRequired
+            }
+            return headers.merging(["Authorization": "Bearer \(refreshedToken)"]) { $1 }
+        }
+
         return headers.merging(["Authorization": "Bearer \(session.accessToken)"]) { $1 }
+    }
+
+    private func proactivelyRefreshIfNeeded(
+        accessToken: String,
+        session: Session? = nil
+    ) async throws -> Bool {
+        let proactiveRefreshLeeway: TimeInterval = 30
+
+        guard autoRefreshToken,
+              let expirationDate = jwtExpirationDate(from: accessToken),
+              expirationDate <= Date().addingTimeInterval(proactiveRefreshLeeway) else {
+            return false
+        }
+
+        let storedSession: Session?
+        if let session {
+            storedSession = session
+        } else {
+            storedSession = try await storage.getSession()
+        }
+
+        guard storedSession?.accessToken == accessToken,
+              storedSession?.refreshToken != nil else {
+            return false
+        }
+
+        logger.debug("Access token is expired or about to expire based on JWT exp claim, refreshing before request...")
+        _ = try await refreshAccessToken()
+        return true
+    }
+
+    private func jwtExpirationDate(from accessToken: String) -> Date? {
+        let segments = accessToken.split(separator: ".")
+        guard segments.count == 3,
+              let payloadData = decodeBase64URL(String(segments[1])),
+              let payload = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any],
+              let expirationInterval = payload["exp"] as? TimeInterval else {
+            return nil
+        }
+
+        return Date(timeIntervalSince1970: expirationInterval)
+    }
+
+    private func decodeBase64URL(_ value: String) -> Data? {
+        var normalized = value
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+
+        let paddingCount = (4 - normalized.count % 4) % 4
+        normalized += String(repeating: "=", count: paddingCount)
+        return Data(base64Encoded: normalized)
     }
 
     /// Execute an authenticated request with automatic token refresh on 401 errors

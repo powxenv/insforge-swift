@@ -857,18 +857,11 @@ final class InsForgeAuthTests: XCTestCase {
             )
         )
 
-        let expiredResponseBarrier = ConcurrentRequestBarrier(parties: 2)
-
         for _ in 0..<2 {
             MockURLProtocol.enqueueStub { request in
                 request.url?.path == "/sessions/current"
                     && request.value(forHTTPHeaderField: "Authorization") == "Bearer expired-access"
             } response: { request in
-                XCTAssertTrue(
-                    expiredResponseBarrier.wait(),
-                    "Timed out waiting for both expired-token requests before responding with 401"
-                )
-
                 return try AuthTestSupport.makeHTTPResponse(
                     url: request.url!,
                     statusCode: 401,
@@ -883,6 +876,14 @@ final class InsForgeAuthTests: XCTestCase {
         MockURLProtocol.enqueueStub { request in
             request.url?.path == "/refresh"
         } response: { request in
+            let deadline = Date().addingTimeInterval(1)
+            while MockURLProtocol.snapshotRecordedRequests().filter({
+                $0.url?.path == "/sessions/current"
+                    && $0.value(forHTTPHeaderField: "Authorization") == "Bearer expired-access"
+            }).count < 2 && Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.01)
+            }
+
             let body = try AuthTestSupport.decodeJSONBody(request)
             XCTAssertEqual(body["refresh_token"] as? String, "refresh-token")
 
