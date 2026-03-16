@@ -949,7 +949,7 @@ public actor AuthClient {
             )
         } catch let error as InsForgeError {
             if case .httpError(let statusCode, _, _, _) = error, statusCode == 401 {
-                logger.error("Refresh token rejected, clearing session state")
+                logger.warning("Refresh token rejected, clearing session state")
                 currentAccessToken = nil
                 try await storage.deleteSession()
                 await onAuthStateChange?(nil)
