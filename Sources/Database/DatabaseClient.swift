@@ -85,11 +85,12 @@ public actor DatabaseClient {
         url: URL,
         headersProvider: LockIsolated<[String: String]>,
         options: DatabaseOptions = DatabaseOptions(),
-        tokenRefreshHandler: (any TokenRefreshHandler)? = nil
+        tokenRefreshHandler: (any TokenRefreshHandler)? = nil,
+        retry: RetryConfiguration = .default
     ) {
         self.url = url
         self.headersProvider = headersProvider
-        self.httpClient = HTTPClient()
+        self.httpClient = HTTPClient(retry: retry)
         self.encoder = options.encoder
         self.decoder = options.decoder
         self.tokenRefreshHandler = tokenRefreshHandler
