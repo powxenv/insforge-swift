@@ -125,6 +125,34 @@ final class InsForgeDatabaseTests: XCTestCase {
         XCTAssertNotNil(page3)
     }
 
+    func testQueryBuilderAdvancedOperators() async {
+        let client = TestHelper.createClient()
+        let builder = await client.database.from("posts")
+
+        let filtered = builder
+            .select("id, title, content")
+            .or("published.eq.true", "views.gt.100")
+            .and("category.eq.swift", "featured.eq.true")
+            .not("status", operator: "eq", value: "archived")
+            .contains("tags", values: ["swift", "ios"])
+            .containedBy("audiences", values: ["swift", "ios", "backend"])
+            .textSearch("content", query: "swift sdk", config: "english", type: .websearch)
+            .filter("priority", operator: "lt", value: 10)
+        XCTAssertNotNil(filtered)
+    }
+
+    func testQueryBuilderAdvancedOperatorArrayOverloads() async {
+        let client = TestHelper.createClient()
+        let builder = await client.database.from("posts")
+
+        let filtered = builder
+            .or(["published.eq.true", "views.gt.100"])
+            .and(["category.eq.swift", "featured.eq.true"])
+            .textSearch("content", query: "swift sdk")
+
+        XCTAssertNotNil(filtered)
+    }
+
     // MARK: - Model Encoding Tests
 
     func testPostModelEncoding() throws {
@@ -383,6 +411,13 @@ final class InsForgeDatabaseTests: XCTestCase {
         XCTAssertEqual(CountOption.estimated.rawValue, "estimated")
     }
 
+    func testTextSearchTypeRawValues() {
+        XCTAssertEqual(TextSearchType.fullText.rawValue, "fts")
+        XCTAssertEqual(TextSearchType.plain.rawValue, "plfts")
+        XCTAssertEqual(TextSearchType.phrase.rawValue, "phfts")
+        XCTAssertEqual(TextSearchType.websearch.rawValue, "wfts")
+    }
+
     func testQueryResultStructure() {
         // Test QueryResult with data and count
         let posts = [
@@ -501,4 +536,5 @@ final class InsForgeDatabaseTests: XCTestCase {
         XCTAssertEqual(postResult.data.count, 1)
         XCTAssertEqual(postResult.count, 1)
     }
+
 }

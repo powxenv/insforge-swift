@@ -15,6 +15,18 @@ public enum CountOption: String, Sendable {
     case estimated
 }
 
+/// Full-text search operators supported by PostgREST.
+public enum TextSearchType: String, Sendable {
+    /// Native PostgreSQL full-text search syntax.
+    case fullText = "fts"
+    /// Plain-to-tsquery parsing.
+    case plain = "plfts"
+    /// Phrase-to-tsquery parsing.
+    case phrase = "phfts"
+    /// Websearch-style parsing.
+    case websearch = "wfts"
+}
+
 /// Result containing both data and count from a query.
 public struct QueryResult<T: Decodable>: Sendable where T: Sendable {
     /// The queried data records.
@@ -184,6 +196,38 @@ public struct QueryBuilder: Sendable {
         self.tokenRefreshHandler = tokenRefreshHandler
     }
 
+    private func appendingQueryItem(name: String, value: String) -> QueryBuilder {
+        var builder = self
+        builder.queryItems.append(URLQueryItem(name: name, value: value))
+        return builder
+    }
+
+    private func appendingGroupedFilters(name: String, filters: [String]) -> QueryBuilder {
+        guard !filters.isEmpty else {
+            return self
+        }
+
+        return appendingQueryItem(
+            name: name,
+            value: "(\(filters.joined(separator: ",")))"
+        )
+    }
+
+    private func buildURL(appending extraQueryItems: [URLQueryItem] = []) throws -> URL {
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        components?.queryItems = queryItems + extraQueryItems
+
+        guard let requestURL = components?.url else {
+            throw InsForgeError.invalidURL
+        }
+
+        return requestURL
+    }
+
+    private func postgresArrayLiteral(from values: [Any]) -> String {
+        "{\(values.map { "\($0)" }.joined(separator: ","))}"
+    }
+
     // MARK: - Query Modifiers
 
     /// Selects specific columns to return.
@@ -247,9 +291,7 @@ public struct QueryBuilder: Sendable {
     ///   - value: The value to match.
     /// - Returns: A new `QueryBuilder` with the filter applied.
     public func eq(_ column: String, value: Any) -> QueryBuilder {
-        var builder = self
-        builder.queryItems.append(URLQueryItem(name: column, value: "eq.\(value)"))
-        return builder
+        appendingQueryItem(name: column, value: "eq.\(value)")
     }
 
     /// Filters by inequality (not equal).
@@ -258,9 +300,7 @@ public struct QueryBuilder: Sendable {
     ///   - value: The value to exclude.
     /// - Returns: A new `QueryBuilder` with the filter applied.
     public func neq(_ column: String, value: Any) -> QueryBuilder {
-        var builder = self
-        builder.queryItems.append(URLQueryItem(name: column, value: "neq.\(value)"))
-        return builder
+        appendingQueryItem(name: column, value: "neq.\(value)")
     }
 
     /// Filters by greater than comparison.
@@ -269,9 +309,7 @@ public struct QueryBuilder: Sendable {
     ///   - value: The threshold value.
     /// - Returns: A new `QueryBuilder` with the filter applied.
     public func gt(_ column: String, value: Any) -> QueryBuilder {
-        var builder = self
-        builder.queryItems.append(URLQueryItem(name: column, value: "gt.\(value)"))
-        return builder
+        appendingQueryItem(name: column, value: "gt.\(value)")
     }
 
     /// Filters by greater than or equal comparison.
@@ -280,9 +318,7 @@ public struct QueryBuilder: Sendable {
     ///   - value: The threshold value.
     /// - Returns: A new `QueryBuilder` with the filter applied.
     public func gte(_ column: String, value: Any) -> QueryBuilder {
-        var builder = self
-        builder.queryItems.append(URLQueryItem(name: column, value: "gte.\(value)"))
-        return builder
+        appendingQueryItem(name: column, value: "gte.\(value)")
     }
 
     /// Filters by less than comparison.
@@ -291,9 +327,7 @@ public struct QueryBuilder: Sendable {
     ///   - value: The threshold value.
     /// - Returns: A new `QueryBuilder` with the filter applied.
     public func lt(_ column: String, value: Any) -> QueryBuilder {
-        var builder = self
-        builder.queryItems.append(URLQueryItem(name: column, value: "lt.\(value)"))
-        return builder
+        appendingQueryItem(name: column, value: "lt.\(value)")
     }
 
     /// Filters by less than or equal comparison.
@@ -302,9 +336,55 @@ public struct QueryBuilder: Sendable {
     ///   - value: The threshold value.
     /// - Returns: A new `QueryBuilder` with the filter applied.
     public func lte(_ column: String, value: Any) -> QueryBuilder {
-        var builder = self
-        builder.queryItems.append(URLQueryItem(name: column, value: "lte.\(value)"))
-        return builder
+        appendingQueryItem(name: column, value: "lte.\(value)")
+    }
+
+    /// Applies OR grouping to multiple filters.
+    /// - Parameter filters: Raw PostgREST filter expressions.
+    /// - Returns: A new `QueryBuilder` with grouped OR filters.
+    public func or(_ filters: String...) -> QueryBuilder {
+        or(filters)
+    }
+
+    /// Applies OR grouping to multiple filters.
+    /// - Parameter filters: Raw PostgREST filter expressions.
+    /// - Returns: A new `QueryBuilder` with grouped OR filters.
+    public func or(_ filters: [String]) -> QueryBuilder {
+        appendingGroupedFilters(name: "or", filters: filters)
+    }
+
+    /// Applies AND grouping to multiple filters.
+    /// - Parameter filters: Raw PostgREST filter expressions.
+    /// - Returns: A new `QueryBuilder` with grouped AND filters.
+    public func and(_ filters: String...) -> QueryBuilder {
+        and(filters)
+    }
+
+    /// Applies AND grouping to multiple filters.
+    /// - Parameter filters: Raw PostgREST filter expressions.
+    /// - Returns: A new `QueryBuilder` with grouped AND filters.
+    public func and(_ filters: [String]) -> QueryBuilder {
+        appendingGroupedFilters(name: "and", filters: filters)
+    }
+
+    /// Applies a custom PostgREST filter operator.
+    /// - Parameters:
+    ///   - column: Column name to filter.
+    ///   - operator: Raw PostgREST filter operator.
+    ///   - value: Preformatted filter value.
+    /// - Returns: A new `QueryBuilder` with the custom filter applied.
+    public func filter(_ column: String, `operator`: String, value: Any) -> QueryBuilder {
+        appendingQueryItem(name: column, value: "\(`operator`).\(value)")
+    }
+
+    /// Applies a negated PostgREST filter operator.
+    /// - Parameters:
+    ///   - column: Column name to filter.
+    ///   - operator: Raw PostgREST filter operator.
+    ///   - value: Preformatted filter value.
+    /// - Returns: A new `QueryBuilder` with the negated filter applied.
+    public func not(_ column: String, `operator`: String, value: Any) -> QueryBuilder {
+        appendingQueryItem(name: column, value: "not.\(`operator`).\(value)")
     }
 
     /// Orders results by a column.
@@ -313,28 +393,22 @@ public struct QueryBuilder: Sendable {
     ///   - ascending: Whether to sort ascending. Defaults to `true`.
     /// - Returns: A new `QueryBuilder` with ordering applied.
     public func order(_ column: String, ascending: Bool = true) -> QueryBuilder {
-        var builder = self
         let direction = ascending ? "asc" : "desc"
-        builder.queryItems.append(URLQueryItem(name: "order", value: "\(column).\(direction)"))
-        return builder
+        return appendingQueryItem(name: "order", value: "\(column).\(direction)")
     }
 
     /// Limits the number of results returned.
     /// - Parameter count: The maximum number of results.
     /// - Returns: A new `QueryBuilder` with the limit applied.
     public func limit(_ count: Int) -> QueryBuilder {
-        var builder = self
-        builder.queryItems.append(URLQueryItem(name: "limit", value: "\(count)"))
-        return builder
+        appendingQueryItem(name: "limit", value: "\(count)")
     }
 
     /// Offsets results for pagination.
     /// - Parameter count: The number of results to skip.
     /// - Returns: A new `QueryBuilder` with the offset applied.
     public func offset(_ count: Int) -> QueryBuilder {
-        var builder = self
-        builder.queryItems.append(URLQueryItem(name: "offset", value: "\(count)"))
-        return builder
+        appendingQueryItem(name: "offset", value: "\(count)")
     }
 
     /// Applies range-based pagination (from and to are inclusive).
@@ -355,9 +429,7 @@ public struct QueryBuilder: Sendable {
     ///   - pattern: Pattern to match (use % as wildcard).
     /// - Returns: A new `QueryBuilder` with like filter.
     public func like(_ column: String, pattern: String) -> QueryBuilder {
-        var builder = self
-        builder.queryItems.append(URLQueryItem(name: column, value: "like.\(pattern)"))
-        return builder
+        appendingQueryItem(name: column, value: "like.\(pattern)")
     }
 
     /// Filters by pattern matching (case-insensitive).
@@ -366,9 +438,7 @@ public struct QueryBuilder: Sendable {
     ///   - pattern: Pattern to match (use % as wildcard).
     /// - Returns: A new `QueryBuilder` with ilike filter.
     public func ilike(_ column: String, pattern: String) -> QueryBuilder {
-        var builder = self
-        builder.queryItems.append(URLQueryItem(name: column, value: "ilike.\(pattern)"))
-        return builder
+        appendingQueryItem(name: column, value: "ilike.\(pattern)")
     }
 
     /// Filters where column value is in an array.
@@ -377,10 +447,8 @@ public struct QueryBuilder: Sendable {
     ///   - values: Array of values to match.
     /// - Returns: A new `QueryBuilder` with in filter.
     public func `in`(_ column: String, values: [Any]) -> QueryBuilder {
-        var builder = self
         let valueString = values.map { "\($0)" }.joined(separator: ",")
-        builder.queryItems.append(URLQueryItem(name: column, value: "in.(\(valueString))"))
-        return builder
+        return appendingQueryItem(name: column, value: "in.(\(valueString))")
     }
 
     /// Filters for null/boolean checks.
@@ -389,15 +457,54 @@ public struct QueryBuilder: Sendable {
     ///   - value: Value to check (null if nil, or true/false).
     /// - Returns: A new `QueryBuilder` with is filter.
     public func `is`(_ column: String, value: Bool?) -> QueryBuilder {
-        var builder = self
         let valueString: String
         if let boolValue = value {
             valueString = boolValue ? "true" : "false"
         } else {
             valueString = "null"
         }
-        builder.queryItems.append(URLQueryItem(name: column, value: "is.\(valueString)"))
-        return builder
+        return appendingQueryItem(name: column, value: "is.\(valueString)")
+    }
+
+    /// Filters where the column contains all specified array values.
+    /// - Parameters:
+    ///   - column: Column name to filter.
+    ///   - values: Values to match inside the array column.
+    /// - Returns: A new `QueryBuilder` with the contains filter applied.
+    public func contains(_ column: String, values: [Any]) -> QueryBuilder {
+        appendingQueryItem(name: column, value: "cs.\(postgresArrayLiteral(from: values))")
+    }
+
+    /// Filters where the column is contained by the specified array values.
+    /// - Parameters:
+    ///   - column: Column name to filter.
+    ///   - values: Superset values to compare against.
+    /// - Returns: A new `QueryBuilder` with the contained-by filter applied.
+    public func containedBy(_ column: String, values: [Any]) -> QueryBuilder {
+        appendingQueryItem(name: column, value: "cd.\(postgresArrayLiteral(from: values))")
+    }
+
+    /// Applies a full-text search filter.
+    /// - Parameters:
+    ///   - column: Text-searchable column.
+    ///   - query: Search query.
+    ///   - config: Optional text search configuration.
+    ///   - type: Text search parsing strategy.
+    /// - Returns: A new `QueryBuilder` with the text search filter applied.
+    public func textSearch(
+        _ column: String,
+        query: String,
+        config: String? = nil,
+        type: TextSearchType = .plain
+    ) -> QueryBuilder {
+        let value: String
+        if let config, !config.isEmpty {
+            value = "\(type.rawValue)(\(config)).\(query)"
+        } else {
+            value = "\(type.rawValue).\(query)"
+        }
+
+        return appendingQueryItem(name: column, value: value)
     }
 
     // MARK: - Execute
@@ -414,12 +521,7 @@ public struct QueryBuilder: Sendable {
     /// - Returns: A `QueryResult` containing data and optional count.
     /// - Throws: `InsForgeError` if the query fails.
     public func executeWithCount<T: Decodable & Sendable>() async throws -> QueryResult<T> {
-        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
-        components?.queryItems = queryItems
-
-        guard let requestURL = components?.url else {
-            throw InsForgeError.invalidURL
-        }
+        let requestURL = try buildURL()
 
         var requestHeaders = headers
         if let countOpt = countOption {
@@ -484,6 +586,47 @@ public struct QueryBuilder: Sendable {
         return result.count ?? 0
     }
 
+    /// Executes a SELECT query and validates that exactly one record is returned.
+    /// - Returns: A single decoded object.
+    /// - Throws: `InsForgeError.validationError` if zero or multiple records are returned.
+    public func single<T: Decodable & Sendable>() async throws -> T {
+        var builder = self
+
+        if !builder.queryItems.contains(where: { $0.name == "select" }) {
+            builder.queryItems.append(URLQueryItem(name: "select", value: "*"))
+        }
+
+        let requestURL = try builder.buildURL()
+        var requestHeaders = builder.headers
+        requestHeaders["Accept"] = "application/vnd.pgrst.object+json"
+
+        logger.debug("GET \(requestURL.absoluteString)")
+        logger.trace("Request headers: \(requestHeaders.filter { $0.key != "Authorization" })")
+
+        do {
+            let response = try await builder.executeRequest(
+                .get,
+                url: requestURL,
+                headers: requestHeaders
+            )
+
+            logger.debug("Response: \(response.response.statusCode)")
+            if let responseString = String(data: response.data, encoding: .utf8) {
+                logger.trace("Response body: \(responseString)")
+            }
+
+            let record = try builder.decoder.decode(T.self, from: response.data)
+            logger.debug("Decoded singular record")
+            return record
+        } catch let error as InsForgeError {
+            if case .httpError(let statusCode, let message, _, _) = error, statusCode == 406 {
+                throw InsForgeError.validationError(message)
+            }
+
+            throw error
+        }
+    }
+
     // MARK: - Insert
 
     /// Inserts multiple records into the table.
@@ -540,6 +683,74 @@ public struct QueryBuilder: Sendable {
         return first
     }
 
+    /// Inserts or updates multiple records using PostgREST upsert semantics.
+    /// - Parameters:
+    ///   - values: Records to insert or update.
+    ///   - onConflict: Optional comma-separated conflict target columns.
+    ///   - ignoreDuplicates: If `true`, conflicting rows are ignored instead of merged.
+    /// - Returns: The inserted or updated records with server-generated fields populated.
+    /// - Throws: `InsForgeError` if the upsert fails.
+    public func upsert<T: Encodable>(
+        _ values: [T],
+        onConflict: String? = nil,
+        ignoreDuplicates: Bool = false
+    ) async throws -> [T] where T: Decodable {
+        let extraQueryItems = onConflict.map { [URLQueryItem(name: "on_conflict", value: $0)] } ?? []
+        let requestURL = try buildURL(appending: extraQueryItems)
+        let data = try encoder.encode(values)
+
+        var requestHeaders = headers
+        requestHeaders["Content-Type"] = "application/json"
+        let resolution = ignoreDuplicates ? "ignore-duplicates" : "merge-duplicates"
+        requestHeaders["Prefer"] = "resolution=\(resolution),return=representation"
+
+        logger.debug("POST \(requestURL.absoluteString)")
+        logger.trace("Request headers: \(requestHeaders.filter { $0.key != "Authorization" })")
+        if let bodyString = String(data: data, encoding: .utf8) {
+            logger.trace("Request body: \(bodyString)")
+        }
+
+        let response = try await executeRequest(
+            .post,
+            url: requestURL,
+            headers: requestHeaders,
+            body: data
+        )
+
+        let statusCode = response.response.statusCode
+        logger.debug("Response: \(statusCode)")
+        if let responseString = String(data: response.data, encoding: .utf8) {
+            logger.trace("Response body: \(responseString)")
+        }
+
+        let result = try decoder.decode([T].self, from: response.data)
+        logger.debug("Upserted \(result.count) record(s)")
+        return result
+    }
+
+    /// Inserts or updates a single record using PostgREST upsert semantics.
+    /// - Parameters:
+    ///   - value: Record to insert or update.
+    ///   - onConflict: Optional comma-separated conflict target columns.
+    ///   - ignoreDuplicates: If `true`, conflicting rows are ignored instead of merged.
+    /// - Returns: The inserted or updated record with server-generated fields populated.
+    /// - Throws: `InsForgeError` if the upsert fails.
+    public func upsert<T: Encodable>(
+        _ value: T,
+        onConflict: String? = nil,
+        ignoreDuplicates: Bool = false
+    ) async throws -> T where T: Decodable {
+        let results: [T] = try await upsert(
+            [value],
+            onConflict: onConflict,
+            ignoreDuplicates: ignoreDuplicates
+        )
+        guard let first = results.first else {
+            throw InsForgeError.unknown("Upsert failed")
+        }
+        return first
+    }
+
     // MARK: - Update
 
     /// Updates records matching the current filters.
@@ -547,12 +758,7 @@ public struct QueryBuilder: Sendable {
     /// - Returns: The updated records.
     /// - Throws: `InsForgeError` if the update fails.
     public func update<T: Encodable>(_ values: T) async throws -> [T] where T: Decodable {
-        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
-        components?.queryItems = queryItems
-
-        guard let requestURL = components?.url else {
-            throw InsForgeError.invalidURL
-        }
+        let requestURL = try buildURL()
 
         let data = try encoder.encode(values)
 
@@ -591,12 +797,7 @@ public struct QueryBuilder: Sendable {
     /// Deletes records matching the current filters.
     /// - Throws: `InsForgeError` if the delete fails.
     public func delete() async throws {
-        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
-        components?.queryItems = queryItems
-
-        guard let requestURL = components?.url else {
-            throw InsForgeError.invalidURL
-        }
+        let requestURL = try buildURL()
 
         // Log request
         logger.debug("DELETE \(requestURL.absoluteString)")
