@@ -113,10 +113,16 @@ internal enum ReconnectDecision: Equatable {
     case schedule(attempt: Int, baseDelay: TimeInterval)
 }
 
+internal enum NetworkAvailability: Sendable, Equatable {
+    case unknown
+    case available
+    case unavailable
+}
+
 internal struct ReconnectRuntimeState: Sendable {
     var retryAttempt: Int = 0
     var shouldMaintainConnection: Bool = false
-    var isNetworkAvailable: Bool = true
+    var networkAvailability: NetworkAvailability = .unknown
     var isManuallyDisconnected: Bool = false
 
     mutating func prepareForConnectionRequest() {
@@ -136,16 +142,16 @@ internal struct ReconnectRuntimeState: Sendable {
         isManuallyDisconnected = true
     }
 
-    mutating func applyNetworkAvailability(_ isAvailable: Bool) -> (didChange: Bool, becameAvailable: Bool) {
-        let wasAvailable = isNetworkAvailable
-        isNetworkAvailable = isAvailable
+    mutating func applyNetworkAvailability(_ availability: NetworkAvailability) -> (didChange: Bool, becameAvailableFromUnavailable: Bool) {
+        let previousAvailability = networkAvailability
+        networkAvailability = availability
 
-        let becameAvailable = !wasAvailable && isAvailable
-        if becameAvailable {
+        let becameAvailableFromUnavailable = previousAvailability == .unavailable && availability == .available
+        if becameAvailableFromUnavailable {
             retryAttempt = 0
         }
 
-        return (wasAvailable != isAvailable, becameAvailable)
+        return (previousAvailability != availability, becameAvailableFromUnavailable)
     }
 
     mutating func nextReconnectDecision(
@@ -156,7 +162,7 @@ internal struct ReconnectRuntimeState: Sendable {
     ) -> ReconnectDecision {
         guard shouldMaintainConnection,
               !isManuallyDisconnected,
-              isNetworkAvailable,
+              networkAvailability != .unavailable,
               !hasPendingReconnectTask,
               !hasActiveConnectTask,
               !isSocketConnected else {
@@ -799,7 +805,7 @@ public final class RealtimeClient: @unchecked Sendable {
 
     private func performConnectAttempt() async throws {
         let runtimeState = reconnectCoordinator.value.runtime
-        guard runtimeState.isNetworkAvailable else {
+        guard runtimeState.networkAvailability != .unavailable else {
             throw NSError(
                 domain: reconnectErrorDomain,
                 code: -1009,
@@ -1067,22 +1073,25 @@ public final class RealtimeClient: @unchecked Sendable {
         notifyError(payload)
     }
 
-    private func handleNetworkAvailabilityChange(_ isAvailable: Bool) {
+    private func handleNetworkAvailabilityChange(_ availability: NetworkAvailability) {
         let transition = reconnectCoordinator.withValue { coordinator in
-            coordinator.runtime.applyNetworkAvailability(isAvailable)
+            coordinator.runtime.applyNetworkAvailability(availability)
         }
 
         guard transition.didChange else { return }
 
-        if isAvailable {
-            if transition.becameAvailable {
+        switch availability {
+        case .available:
+            if transition.becameAvailableFromUnavailable {
                 logDebug("Network restored. Reconnect retry counter reset.")
             }
             logDebug("Network is reachable. Evaluating pending reconnect flow.")
             scheduleReconnect(reason: "network_available")
-        } else {
+        case .unavailable:
             logDebug("Network is unavailable. Pausing reconnect attempts.")
             cancelReconnectTask()
+        case .unknown:
+            break
         }
     }
 
@@ -1090,11 +1099,11 @@ public final class RealtimeClient: @unchecked Sendable {
 #if canImport(Network)
         let monitor = NWPathMonitor()
         monitor.pathUpdateHandler = { [weak self] path in
-            self?.handleNetworkAvailabilityChange(path.status == .satisfied)
+            let availability: NetworkAvailability = path.status == .satisfied ? .available : .unavailable
+            self?.handleNetworkAvailabilityChange(availability)
         }
         monitor.start(queue: networkMonitorQueue)
         networkMonitor = monitor
-        handleNetworkAvailabilityChange(monitor.currentPath.status == .satisfied)
 #endif
     }
 

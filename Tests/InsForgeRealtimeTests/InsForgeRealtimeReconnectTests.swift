@@ -61,7 +61,7 @@ final class InsForgeRealtimeReconnectTests: XCTestCase {
         let policy = ReconnectPolicy.default
         var state = ReconnectRuntimeState()
         state.prepareForConnectionRequest()
-        _ = state.applyNetworkAvailability(false)
+        _ = state.applyNetworkAvailability(.unavailable)
 
         let decision = state.nextReconnectDecision(
             policy: policy,
@@ -73,12 +73,32 @@ final class InsForgeRealtimeReconnectTests: XCTestCase {
         XCTAssertEqual(decision, .none)
     }
 
+    func testReconnectDecisionAllowedWhenNetworkAvailabilityIsUnknown() {
+        let policy = ReconnectPolicy.default
+        var state = ReconnectRuntimeState()
+        state.prepareForConnectionRequest()
+
+        let decision = state.nextReconnectDecision(
+            policy: policy,
+            hasPendingReconnectTask: false,
+            hasActiveConnectTask: false,
+            isSocketConnected: false
+        )
+
+        if case .schedule(let attempt, let baseDelay) = decision {
+            XCTAssertEqual(attempt, 1)
+            XCTAssertEqual(baseDelay, 1.0, accuracy: 0.0001)
+        } else {
+            XCTFail("Expected reconnect to be scheduled when network availability is unknown")
+        }
+    }
+
     func testReconnectDecisionResumesAfterNetworkBecomesAvailable() {
         let policy = ReconnectPolicy.default
         var state = ReconnectRuntimeState()
         state.prepareForConnectionRequest()
 
-        _ = state.applyNetworkAvailability(false)
+        _ = state.applyNetworkAvailability(.unavailable)
         let blockedDecision = state.nextReconnectDecision(
             policy: policy,
             hasPendingReconnectTask: false,
@@ -87,7 +107,9 @@ final class InsForgeRealtimeReconnectTests: XCTestCase {
         )
         XCTAssertEqual(blockedDecision, .none)
 
-        _ = state.applyNetworkAvailability(true)
+        let becameOnline = state.applyNetworkAvailability(.available)
+        XCTAssertTrue(becameOnline.didChange)
+        XCTAssertTrue(becameOnline.becameAvailableFromUnavailable)
         let resumedDecision = state.nextReconnectDecision(
             policy: policy,
             hasPendingReconnectTask: false,
@@ -164,6 +186,32 @@ final class InsForgeRealtimeReconnectTests: XCTestCase {
         XCTAssertEqual(state.retryAttempt, 0)
     }
 
+    func testUnknownToAvailableTransitionDoesNotResetRetryAttempt() {
+        let policy = ReconnectPolicy.default
+        var state = ReconnectRuntimeState()
+        state.prepareForConnectionRequest()
+
+        _ = state.nextReconnectDecision(
+            policy: policy,
+            hasPendingReconnectTask: false,
+            hasActiveConnectTask: false,
+            isSocketConnected: false
+        )
+        _ = state.nextReconnectDecision(
+            policy: policy,
+            hasPendingReconnectTask: false,
+            hasActiveConnectTask: false,
+            isSocketConnected: false
+        )
+
+        XCTAssertEqual(state.retryAttempt, 2)
+
+        let transition = state.applyNetworkAvailability(.available)
+        XCTAssertTrue(transition.didChange)
+        XCTAssertFalse(transition.becameAvailableFromUnavailable)
+        XCTAssertEqual(state.retryAttempt, 2)
+    }
+
     func testRetryAttemptResetsWhenNetworkIsRestored() {
         let policy = ReconnectPolicy.default
         var state = ReconnectRuntimeState()
@@ -184,14 +232,14 @@ final class InsForgeRealtimeReconnectTests: XCTestCase {
 
         XCTAssertEqual(state.retryAttempt, 2)
 
-        let becameOffline = state.applyNetworkAvailability(false)
+        let becameOffline = state.applyNetworkAvailability(.unavailable)
         XCTAssertTrue(becameOffline.didChange)
-        XCTAssertFalse(becameOffline.becameAvailable)
+        XCTAssertFalse(becameOffline.becameAvailableFromUnavailable)
         XCTAssertEqual(state.retryAttempt, 2)
 
-        let becameOnline = state.applyNetworkAvailability(true)
+        let becameOnline = state.applyNetworkAvailability(.available)
         XCTAssertTrue(becameOnline.didChange)
-        XCTAssertTrue(becameOnline.becameAvailable)
+        XCTAssertTrue(becameOnline.becameAvailableFromUnavailable)
         XCTAssertEqual(state.retryAttempt, 0)
 
         let decision = state.nextReconnectDecision(
