@@ -7,7 +7,12 @@ import Foundation
 /// Conforming types must expose an `HTTPClient` and an optional `TokenRefreshHandler`.
 /// The protocol extension provides a default `executeRequest` implementation that
 /// delegates to `executeWithAutoRefresh` when a handler is present, and `execute` otherwise.
-protocol HTTPRequestExecutable {
+/// A protocol for types that can execute HTTP requests with optional automatic token refresh.
+///
+/// `httpClient` and `tokenRefreshHandler` are intentionally **not** part of the public API —
+/// conforming types expose them as `internal let` (structs) or `nonisolated let` (actors),
+/// so they remain invisible to SDK consumers even though the protocol itself is public.
+public protocol HTTPRequestExecutable {
     var httpClient: HTTPClient { get }
     var tokenRefreshHandler: (any TokenRefreshHandler)? { get }
 }
