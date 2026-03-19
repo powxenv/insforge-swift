@@ -148,13 +148,13 @@ public actor DatabaseClient {
 ///
 /// Provides a fluent interface for constructing and executing database queries.
 /// Supports filtering, ordering, pagination, and CRUD operations.
-public struct QueryBuilder: Sendable, HTTPRequestExecutable {
+public struct QueryBuilder: Sendable {
     private let url: URL
     private let headersProvider: LockIsolated<[String: String]>
-    let httpClient: HTTPClient
+    private let httpClient: HTTPClient
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
-    let tokenRefreshHandler: (any TokenRefreshHandler)?
+    private let tokenRefreshHandler: (any TokenRefreshHandler)?
     private var queryItems: [URLQueryItem] = []
     private var preferHeader: String?
     private var countOption: CountOption?
@@ -410,7 +410,9 @@ public struct QueryBuilder: Sendable, HTTPRequestExecutable {
         let response = try await executeRequest(
             method,
             url: requestURL,
-            headers: requestHeaders
+            headers: requestHeaders,
+            httpClient: httpClient,
+            tokenRefreshHandler: tokenRefreshHandler
         )
 
         // Log response
@@ -484,11 +486,13 @@ public struct QueryBuilder: Sendable, HTTPRequestExecutable {
             logger.trace("Request body: \(bodyString)")
         }
 
-        let response = try await builder.executeRequest(
+        let response = try await executeRequest(
             .post,
             url: builder.url,
             headers: requestHeaders,
-            body: data
+            body: data,
+            httpClient: builder.httpClient,
+            tokenRefreshHandler: builder.tokenRefreshHandler
         )
 
         // Log response
@@ -546,7 +550,9 @@ public struct QueryBuilder: Sendable, HTTPRequestExecutable {
             .patch,
             url: requestURL,
             headers: requestHeaders,
-            body: data
+            body: data,
+            httpClient: httpClient,
+            tokenRefreshHandler: tokenRefreshHandler
         )
 
         // Log response
@@ -580,7 +586,9 @@ public struct QueryBuilder: Sendable, HTTPRequestExecutable {
         let response = try await executeRequest(
             .delete,
             url: requestURL,
-            headers: headers
+            headers: headers,
+            httpClient: httpClient,
+            tokenRefreshHandler: tokenRefreshHandler
         )
 
         // Log response
@@ -597,14 +605,14 @@ public struct QueryBuilder: Sendable, HTTPRequestExecutable {
 /// Builder for executing PostgreSQL RPC (Remote Procedure Call) functions.
 ///
 /// Provides a simple interface for calling database functions with optional parameters.
-public struct RPCBuilder: Sendable, HTTPRequestExecutable {
+public struct RPCBuilder: Sendable {
     private let url: URL
     private let headersProvider: LockIsolated<[String: String]>
-    let httpClient: HTTPClient
+    private let httpClient: HTTPClient
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
     private let argsData: Data?
-    let tokenRefreshHandler: (any TokenRefreshHandler)?
+    private let tokenRefreshHandler: (any TokenRefreshHandler)?
 
     /// Logger for debug output
     private var logger: Logging.Logger { InsForgeLoggerFactory.shared }
@@ -657,7 +665,9 @@ public struct RPCBuilder: Sendable, HTTPRequestExecutable {
             .post,
             url: url,
             headers: requestHeaders,
-            body: argsData
+            body: argsData,
+            httpClient: httpClient,
+            tokenRefreshHandler: tokenRefreshHandler
         )
 
         // Log response
@@ -709,7 +719,9 @@ public struct RPCBuilder: Sendable, HTTPRequestExecutable {
             .post,
             url: url,
             headers: requestHeaders,
-            body: argsData
+            body: argsData,
+            httpClient: httpClient,
+            tokenRefreshHandler: tokenRefreshHandler
         )
 
         // Log response

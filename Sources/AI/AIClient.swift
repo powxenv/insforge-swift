@@ -3,11 +3,11 @@ import InsForgeCore
 import Logging
 
 /// AI client for chat and image generation
-public actor AIClient: HTTPRequestExecutable {
+public actor AIClient {
     private let url: URL
     private let headersProvider: LockIsolated<[String: String]>
-    nonisolated let httpClient: HTTPClient
-    nonisolated let tokenRefreshHandler: (any TokenRefreshHandler)?
+    private let httpClient: HTTPClient
+    private let tokenRefreshHandler: (any TokenRefreshHandler)?
     private var logger: Logging.Logger { InsForgeLoggerFactory.shared }
 
     /// Get current headers (dynamically fetched to reflect auth state changes)
@@ -111,7 +111,9 @@ public actor AIClient: HTTPRequestExecutable {
             .post,
             url: endpoint,
             headers: requestHeaders,
-            body: data
+            body: data,
+            httpClient: httpClient,
+            tokenRefreshHandler: tokenRefreshHandler
         )
 
         // Log response
@@ -160,7 +162,9 @@ public actor AIClient: HTTPRequestExecutable {
             .post,
             url: endpoint,
             headers: requestHeaders,
-            body: data
+            body: data,
+            httpClient: httpClient,
+            tokenRefreshHandler: tokenRefreshHandler
         )
 
         // Log response
@@ -220,7 +224,9 @@ public actor AIClient: HTTPRequestExecutable {
             .post,
             url: endpoint,
             headers: requestHeaders,
-            body: data
+            body: data,
+            httpClient: httpClient,
+            tokenRefreshHandler: tokenRefreshHandler
         )
 
         // Log response
@@ -248,7 +254,9 @@ public actor AIClient: HTTPRequestExecutable {
         let response = try await executeRequest(
             .get,
             url: endpoint,
-            headers: headers
+            headers: headers,
+            httpClient: httpClient,
+            tokenRefreshHandler: tokenRefreshHandler
         )
 
         // Log response

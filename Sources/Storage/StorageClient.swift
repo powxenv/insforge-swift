@@ -102,11 +102,11 @@ public struct DownloadStrategy: Codable, Sendable {
 // MARK: - Storage Client
 
 /// Storage client for managing buckets and files
-public actor StorageClient: HTTPRequestExecutable {
+public actor StorageClient {
     private let url: URL
     private let headersProvider: LockIsolated<[String: String]>
-    nonisolated let httpClient: HTTPClient
-    nonisolated let tokenRefreshHandler: (any TokenRefreshHandler)?
+    private let httpClient: HTTPClient
+    private let tokenRefreshHandler: (any TokenRefreshHandler)?
     private var logger: Logging.Logger { InsForgeLoggerFactory.shared }
 
     /// Get current headers (dynamically fetched to reflect auth state changes)
@@ -159,7 +159,9 @@ public actor StorageClient: HTTPRequestExecutable {
         let response = try await executeRequest(
             .get,
             url: endpoint,
-            headers: headers
+            headers: headers,
+            httpClient: httpClient,
+            tokenRefreshHandler: tokenRefreshHandler
         )
 
         // Log response
@@ -187,7 +189,9 @@ public actor StorageClient: HTTPRequestExecutable {
         let response = try await executeRequest(
             .get,
             url: endpoint,
-            headers: headers
+            headers: headers,
+            httpClient: httpClient,
+            tokenRefreshHandler: tokenRefreshHandler
         )
 
         // Log response
@@ -228,7 +232,9 @@ public actor StorageClient: HTTPRequestExecutable {
             .post,
             url: endpoint,
             headers: requestHeaders,
-            body: data
+            body: data,
+            httpClient: httpClient,
+            tokenRefreshHandler: tokenRefreshHandler
         )
 
         // Log response
@@ -266,7 +272,9 @@ public actor StorageClient: HTTPRequestExecutable {
             .patch,
             url: endpoint,
             headers: requestHeaders,
-            body: data
+            body: data,
+            httpClient: httpClient,
+            tokenRefreshHandler: tokenRefreshHandler
         )
 
         // Log response
@@ -291,7 +299,9 @@ public actor StorageClient: HTTPRequestExecutable {
         let response = try await executeRequest(
             .delete,
             url: endpoint,
-            headers: headers
+            headers: headers,
+            httpClient: httpClient,
+            tokenRefreshHandler: tokenRefreshHandler
         )
 
         // Log response
@@ -308,12 +318,12 @@ public actor StorageClient: HTTPRequestExecutable {
 // MARK: - Storage File API
 
 /// Storage file operations for a specific bucket
-public struct StorageFileApi: Sendable, HTTPRequestExecutable {
+public struct StorageFileApi: Sendable {
     private let bucketId: String
     private let url: URL
     private let headersProvider: LockIsolated<[String: String]>
-    let httpClient: HTTPClient
-    let tokenRefreshHandler: (any TokenRefreshHandler)?
+    private let httpClient: HTTPClient
+    private let tokenRefreshHandler: (any TokenRefreshHandler)?
     private var logger: Logging.Logger { InsForgeLoggerFactory.shared }
 
     /// Get current headers (dynamically fetched to reflect auth state changes)
@@ -584,7 +594,9 @@ public struct StorageFileApi: Sendable, HTTPRequestExecutable {
         let response = try await executeRequest(
             .get,
             url: requestURL,
-            headers: headers
+            headers: headers,
+            httpClient: httpClient,
+            tokenRefreshHandler: tokenRefreshHandler
         )
 
         // Log response
@@ -631,7 +643,9 @@ public struct StorageFileApi: Sendable, HTTPRequestExecutable {
         let response = try await executeRequest(
             .delete,
             url: endpoint,
-            headers: headers
+            headers: headers,
+            httpClient: httpClient,
+            tokenRefreshHandler: tokenRefreshHandler
         )
 
         // Log response
@@ -697,7 +711,9 @@ public struct StorageFileApi: Sendable, HTTPRequestExecutable {
             .post,
             url: endpoint,
             headers: requestHeaders,
-            body: data
+            body: data,
+            httpClient: httpClient,
+            tokenRefreshHandler: tokenRefreshHandler
         )
 
         // Log response
@@ -757,7 +773,9 @@ public struct StorageFileApi: Sendable, HTTPRequestExecutable {
             .post,
             url: endpoint,
             headers: requestHeaders,
-            body: data
+            body: data,
+            httpClient: httpClient,
+            tokenRefreshHandler: tokenRefreshHandler
         )
 
         // Log response
@@ -805,7 +823,9 @@ public struct StorageFileApi: Sendable, HTTPRequestExecutable {
             .post,
             url: endpoint,
             headers: requestHeaders,
-            body: data
+            body: data,
+            httpClient: httpClient,
+            tokenRefreshHandler: tokenRefreshHandler
         )
 
         // Log response
