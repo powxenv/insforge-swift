@@ -166,5 +166,10 @@ let package = Package(
             dependencies: ["InsForge", "InsForgeRealtime", "TestHelper"],
             path: "Tests/InsForgeRealtimeTests"
         ),
+        .testTarget(
+            name: "InsForgeCoreTests",
+            dependencies: ["InsForgeCore"],
+            path: "Tests/InsForgeCoreTests"
+        ),
     ]
 )

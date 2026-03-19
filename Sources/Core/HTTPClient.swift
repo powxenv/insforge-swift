@@ -36,6 +36,59 @@ public enum HTTPMethod: String {
     case delete = "DELETE"
     /// HTTP HEAD method.
     case head = "HEAD"
+
+    /// Returns `true` for methods that are safe to retry automatically.
+    /// POST and PATCH are excluded because replaying them on a transient error
+    /// could duplicate a mutation (e.g. double-insert or double-charge).
+    var isIdempotent: Bool {
+        switch self {
+        case .get, .head, .put, .delete: return true
+        case .post, .patch: return false
+        }
+    }
+}
+
+// MARK: - Retry Configuration (re-exported for use inside Core)
+
+/// Controls automatic retry behaviour. Defined in `InsForgeClientOptions`
+/// and forwarded here so `HTTPClient` remains independent of the top-level module.
+public struct RetryConfiguration: Sendable {
+    public let maxRetries: Int
+    public let baseDelay: TimeInterval
+    public let maxDelay: TimeInterval
+    public let useJitter: Bool
+
+    public static let `default` = RetryConfiguration()
+    public static let disabled = RetryConfiguration(maxRetries: 0)
+
+    public init(
+        maxRetries: Int = 3,
+        baseDelay: TimeInterval = 0.5,
+        maxDelay: TimeInterval = 30,
+        useJitter: Bool = true
+    ) {
+        self.maxRetries = max(0, maxRetries)
+        self.baseDelay = max(0, baseDelay)
+        self.maxDelay = max(0, maxDelay)
+        self.useJitter = useJitter
+    }
+
+    func delay(for attempt: Int) -> TimeInterval {
+        let exponential = baseDelay * pow(2.0, Double(attempt))
+        let capped = min(exponential, maxDelay)
+        guard useJitter else { return capped }
+        let jitter = Double.random(in: 0...(capped * 0.1))
+        return capped + jitter
+    }
+}
+
+/// Carries a 429 response's `InsForgeError` together with the parsed `Retry-After`
+/// delay. Using a dedicated error type (rather than actor-stored mutable state) ensures
+/// that concurrent retry loops each get their own `Retry-After` value and cannot
+/// accidentally read a value written by a different concurrent request.
+private struct RateLimitedError: Error {
+    let insForgeError: InsForgeError
+    let retryAfter: TimeInterval?
 }
 
 /// HTTP Client for making network requests.
@@ -44,13 +97,173 @@ public enum HTTPMethod: String {
 /// various HTTP methods, file uploads, and response decoding.
 public actor HTTPClient {
     private let session: URLSession
+    private let retry: RetryConfiguration
     private var logger: Logging.Logger { InsForgeLoggerFactory.shared }
 
     /// Creates a new HTTP client.
-    /// - Parameter session: The URL session to use for requests. Defaults to `.shared`.
-    public init(session: URLSession = .shared) {
+    /// - Parameters:
+    ///   - session: The URL session to use for requests. Defaults to `.shared`.
+    ///   - retry: Retry configuration for transient failures. Defaults to `.default`.
+    public init(session: URLSession = .shared, retry: RetryConfiguration = .default) {
         self.session = session
+        self.retry = retry
     }
+
+    // MARK: - Private Helpers
+
+    /// Builds a `URLRequest` from the given parameters.
+    private func buildRequest(
+        method: HTTPMethod,
+        url: URL,
+        headers: [String: String],
+        body: Data?
+    ) -> URLRequest {
+        var request = URLRequest(url: url)
+        request.httpMethod = method.rawValue
+        request.httpBody = body
+        for (key, value) in headers {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+        return request
+    }
+
+    /// Parses the `Retry-After` header from an `HTTPURLResponse`.
+    ///
+    /// The header may be an integer number of seconds or an HTTP-date string.
+    private func parseRetryAfter(from httpResponse: HTTPURLResponse) -> TimeInterval? {
+        guard let value = httpResponse.value(forHTTPHeaderField: "Retry-After") else {
+            return nil
+        }
+        // Integer seconds form: "Retry-After: 30"
+        if let seconds = TimeInterval(value) {
+            return seconds
+        }
+        // HTTP-date form: "Retry-After: Wed, 21 Oct 2015 07:28:00 GMT"
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+        if let date = formatter.date(from: value) {
+            return max(0, date.timeIntervalSinceNow)
+        }
+        return nil
+    }
+
+    /// Performs a single `URLSession` round-trip and converts the result into
+    /// an `HTTPResponse`, throwing `InsForgeError` on non-2xx status codes.
+    ///
+    /// For 429 responses, throws `RateLimitedError` (a private type) so that the
+    /// parsed `Retry-After` value travels with the error rather than being stored as
+    /// mutable actor state (which could be overwritten by a concurrent request).
+    private func performRequest(_ request: URLRequest) async throws -> HTTPResponse {
+        do {
+            let (data, response) = try await session.data(for: request)
+
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw InsForgeError.invalidResponse
+            }
+
+            logger.debug("Response status: \(httpResponse.statusCode)")
+            if let responseString = String(data: data, encoding: .utf8) {
+                logger.trace("Response body: \(responseString)")
+            }
+
+            if !(200..<300).contains(httpResponse.statusCode) {
+                let errorBody = try? JSONDecoder().decode(ErrorResponse.self, from: data)
+                logger.error("HTTP Error: status=\(httpResponse.statusCode), message=\(errorBody?.message ?? "Request failed")")
+                let insForgeError = InsForgeError.httpError(
+                    statusCode: httpResponse.statusCode,
+                    message: errorBody?.message ?? "Request failed",
+                    error: errorBody?.error,
+                    nextActions: errorBody?.nextActions
+                )
+                // For 429, carry the Retry-After value through a private error wrapper
+                // so that concurrent retry loops each see their own value.
+                if httpResponse.statusCode == 429 {
+                    throw RateLimitedError(
+                        insForgeError: insForgeError,
+                        retryAfter: parseRetryAfter(from: httpResponse)
+                    )
+                }
+                throw insForgeError
+            }
+
+            return HTTPResponse(data: data, response: httpResponse)
+        } catch let error as RateLimitedError {
+            throw error
+        } catch let error as InsForgeError {
+            throw error
+        } catch {
+            logger.error("Network error: \(error)")
+            throw InsForgeError.networkError(NetworkError.from(error))
+        }
+    }
+
+    /// Returns `true` for status codes that should trigger an automatic retry.
+    private func isRetryableStatusCode(_ code: Int) -> Bool {
+        code == 429 || (500...599).contains(code)
+    }
+
+    /// Returns `true` for `InsForgeError` values that should trigger an automatic retry.
+    private func isRetryableError(_ error: InsForgeError) -> Bool {
+        switch error {
+        case .httpError(let statusCode, _, _, _):
+            return isRetryableStatusCode(statusCode)
+        case .networkError(let networkError):
+            switch networkError {
+            case .timeout, .cannotConnect, .other:
+                return true
+            case .noNetwork, .cancelled, .sslError:
+                return false
+            }
+        default:
+            return false
+        }
+    }
+
+    /// Executes `operation` with automatic retry on transient failures.
+    ///
+    /// - 429 responses: waits for the duration specified in `Retry-After` (or falls
+    ///   back to the computed back-off delay). The delay is read from the private
+    ///   `RateLimitedError` wrapper — never from shared actor state — so concurrent
+    ///   requests cannot interfere with each other's retry timing.
+    /// - 5xx responses / transient network errors: uses truncated exponential back-off.
+    private func withRetry(
+        _ operation: () async throws -> HTTPResponse
+    ) async throws -> HTTPResponse {
+        var attempt = 0
+        while true {
+            do {
+                return try await operation()
+            } catch let rateLimited as RateLimitedError {
+                let error = rateLimited.insForgeError
+                guard retry.maxRetries > 0,
+                      attempt < retry.maxRetries,
+                      isRetryableError(error) else {
+                    throw error
+                }
+                let waitTime = rateLimited.retryAfter ?? retry.delay(for: attempt)
+                logger.warning("Rate limited (429). Retrying after \(waitTime)s (attempt \(attempt + 1)/\(retry.maxRetries))…")
+                try await Task.sleep(nanoseconds: UInt64(waitTime * 1_000_000_000))
+                attempt += 1
+            } catch let error as InsForgeError {
+                guard retry.maxRetries > 0,
+                      attempt < retry.maxRetries,
+                      isRetryableError(error) else {
+                    throw error
+                }
+                let waitTime = retry.delay(for: attempt)
+                if case .httpError(let code, _, _, _) = error {
+                    logger.warning("HTTP \(code) error. Retrying in \(String(format: "%.2f", waitTime))s (attempt \(attempt + 1)/\(retry.maxRetries))…")
+                } else {
+                    logger.warning("Transient network error. Retrying in \(String(format: "%.2f", waitTime))s (attempt \(attempt + 1)/\(retry.maxRetries))…")
+                }
+                try await Task.sleep(nanoseconds: UInt64(waitTime * 1_000_000_000))
+                attempt += 1
+            }
+        }
+    }
+
+    // MARK: - Public API
 
     /// Executes an HTTP request.
     /// - Parameters:
@@ -66,14 +279,7 @@ public actor HTTPClient {
         headers: [String: String] = [:],
         body: Data? = nil
     ) async throws -> HTTPResponse {
-        var request = URLRequest(url: url)
-        request.httpMethod = method.rawValue
-        request.httpBody = body
-
-        // Set headers
-        for (key, value) in headers {
-            request.setValue(value, forHTTPHeaderField: key)
-        }
+        let request = buildRequest(method: method, url: url, headers: headers, body: body)
 
         logger.debug("[\(method.rawValue)] \(url)")
         if !headers.isEmpty {
@@ -83,44 +289,12 @@ public actor HTTPClient {
             logger.trace("Request body: \(bodyString)")
         }
 
-        do {
-            let (data, response) = try await session.data(for: request)
-
-            guard let httpResponse = response as? HTTPURLResponse else {
-                throw InsForgeError.invalidResponse
+        if method.isIdempotent {
+            return try await withRetry {
+                try await self.performRequest(request)
             }
-
-            logger.debug("Response status: \(httpResponse.statusCode)")
-
-            // Log response body for debugging
-            if let responseString = String(data: data, encoding: .utf8) {
-                logger.trace("Response body: \(responseString)")
-            }
-
-            let httpResponseObj = HTTPResponse(
-                data: data,
-                response: httpResponse
-            )
-
-            // Check for errors
-            if !(200..<300).contains(httpResponse.statusCode) {
-                let error = try? JSONDecoder().decode(ErrorResponse.self, from: data)
-                logger.error("HTTP Error: status=\(httpResponse.statusCode), message=\(error?.message ?? "Request failed")")
-                throw InsForgeError.httpError(
-                    statusCode: httpResponse.statusCode,
-                    message: error?.message ?? "Request failed",
-                    error: error?.error,
-                    nextActions: error?.nextActions
-                )
-            }
-
-            return httpResponseObj
-        } catch let error as InsForgeError {
-            throw error
-        } catch {
-            logger.error("Network error: \(error)")
-            throw InsForgeError.networkError(error)
         }
+        return try await performRequest(request)
     }
 
     /// Uploads multipart form data with the specified HTTP method.
@@ -142,17 +316,9 @@ public actor HTTPClient {
         mimeType: String
     ) async throws -> HTTPResponse {
         let boundary = UUID().uuidString
-        var request = URLRequest(url: url)
-        request.httpMethod = method.rawValue
-
-        // Set headers
         var allHeaders = headers
         allHeaders["Content-Type"] = "multipart/form-data; boundary=\(boundary)"
-        for (key, value) in allHeaders {
-            request.setValue(value, forHTTPHeaderField: key)
-        }
 
-        // Create multipart body
         var body = Data()
         body.append(Data("--\(boundary)\r\n".utf8))
         body.append(Data("Content-Disposition: form-data; name=\"file\"; filename=\"\(fileName)\"\r\n".utf8))
@@ -160,34 +326,13 @@ public actor HTTPClient {
         body.append(file)
         body.append(Data("\r\n--\(boundary)--\r\n".utf8))
 
-        request.httpBody = body
+        let request = buildRequest(method: method, url: url, headers: allHeaders, body: body)
 
         logger.debug("[UPLOAD-\(method.rawValue)] \(url)")
 
-        let (data, response) = try await session.data(for: request)
-
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw InsForgeError.invalidResponse
+        return try await withRetry {
+            try await self.performRequest(request)
         }
-
-        logger.debug("Upload response status: \(httpResponse.statusCode)")
-
-        let httpResponseObj = HTTPResponse(
-            data: data,
-            response: httpResponse
-        )
-
-        if !(200..<300).contains(httpResponse.statusCode) {
-            let error = try? JSONDecoder().decode(ErrorResponse.self, from: data)
-            throw InsForgeError.httpError(
-                statusCode: httpResponse.statusCode,
-                message: error?.message ?? "Upload failed",
-                error: error?.error,
-                nextActions: error?.nextActions
-            )
-        }
-
-        return httpResponseObj
     }
 
     // MARK: - Auto-Refresh Execution

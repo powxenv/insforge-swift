@@ -6,6 +6,9 @@ import Logging
 
 /// Configuration options for InsForge client
 public struct InsForgeClientOptions: Sendable {
+
+    // MARK: - Global Options
+
     /// Global configuration options
     public struct GlobalOptions: Sendable {
         /// Additional headers to include in all requests
@@ -33,6 +36,9 @@ public struct InsForgeClientOptions: Sendable {
         /// Subsystem identifier for logging (used with osLog destination)
         public let logSubsystem: String
 
+        /// Retry behaviour for transient HTTP failures (429 and 5xx).
+        public let retry: InsForgeCore.RetryConfiguration
+
         /// Creates global options with logging configuration
         /// - Parameters:
         ///   - headers: Additional headers to include in all requests
@@ -40,18 +46,21 @@ public struct InsForgeClientOptions: Sendable {
         ///   - logLevel: Minimum log level to output (default: .info)
         ///   - logDestination: Where to output logs (default: .console)
         ///   - logSubsystem: Subsystem identifier for logging (default: "com.insforge.sdk")
+        ///   - retry: Retry configuration for transient errors (default: `.default`)
         public init(
             headers: [String: String] = [:],
             session: URLSession = .shared,
             logLevel: Logging.Logger.Level = .info,
             logDestination: LogDestination = .console,
-            logSubsystem: String = "com.insforge.sdk"
+            logSubsystem: String = "com.insforge.sdk",
+            retry: InsForgeCore.RetryConfiguration = .default
         ) {
             self.headers = headers
             self.session = session
             self.logLevel = logLevel
             self.logDestination = logDestination
             self.logSubsystem = logSubsystem
+            self.retry = retry
         }
     }
 

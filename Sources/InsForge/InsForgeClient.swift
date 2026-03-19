@@ -110,7 +110,8 @@ public final class InsForgeClient: Sendable {
             url: baseURL.appendingPathComponent("api/auth"),
             authComponent: baseURL.appendingPathComponent("auth"),
             headers: headers,
-            options: options.auth
+            options: options.auth,
+            retry: options.global.retry
         )
 
         // Initialize token refresh handler for automatic 401 retry
@@ -162,7 +163,8 @@ public final class InsForgeClient: Sendable {
                     url: baseURL.appendingPathComponent("api/database"),
                     headersProvider: _headers,
                     options: options.database,
-                    tokenRefreshHandler: _tokenRefreshHandler
+                    tokenRefreshHandler: _tokenRefreshHandler,
+                    retry: options.global.retry
                 )
             }
             return state.database!
@@ -177,7 +179,8 @@ public final class InsForgeClient: Sendable {
                 state.storage = StorageClient(
                     url: baseURL.appendingPathComponent("api/storage"),
                     headersProvider: _headers,
-                    tokenRefreshHandler: _tokenRefreshHandler
+                    tokenRefreshHandler: _tokenRefreshHandler,
+                    retry: options.global.retry
                 )
             }
             return state.storage!
@@ -192,7 +195,8 @@ public final class InsForgeClient: Sendable {
                 state.functions = FunctionsClient(
                     url: baseURL.appendingPathComponent("functions"),
                     headersProvider: _headers,
-                    tokenRefreshHandler: _tokenRefreshHandler
+                    tokenRefreshHandler: _tokenRefreshHandler,
+                    retry: options.global.retry
                 )
             }
             return state.functions!
@@ -207,7 +211,8 @@ public final class InsForgeClient: Sendable {
                 state.ai = AIClient(
                     url: baseURL.appendingPathComponent("api/ai"),
                     headersProvider: _headers,
-                    tokenRefreshHandler: _tokenRefreshHandler
+                    tokenRefreshHandler: _tokenRefreshHandler,
+                    retry: options.global.retry
                 )
             }
             return state.ai!

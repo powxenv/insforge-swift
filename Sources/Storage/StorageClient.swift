@@ -117,11 +117,12 @@ public actor StorageClient {
     public init(
         url: URL,
         headersProvider: LockIsolated<[String: String]>,
-        tokenRefreshHandler: (any TokenRefreshHandler)? = nil
+        tokenRefreshHandler: (any TokenRefreshHandler)? = nil,
+        retry: RetryConfiguration = .default
     ) {
         self.url = url
         self.headersProvider = headersProvider
-        self.httpClient = HTTPClient()
+        self.httpClient = HTTPClient(retry: retry)
         self.tokenRefreshHandler = tokenRefreshHandler
     }
 

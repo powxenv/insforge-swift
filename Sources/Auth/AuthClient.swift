@@ -118,13 +118,14 @@ public actor AuthClient {
         url: URL,
         authComponent: URL,
         headers: [String: String],
-        options: AuthOptions = AuthOptions()
+        options: AuthOptions = AuthOptions(),
+        retry: RetryConfiguration = .default
     ) {
         self.init(
             url: url,
             authComponent: authComponent,
             headers: headers,
-            httpClient: HTTPClient(),
+            httpClient: HTTPClient(retry: retry),
             options: options
         )
     }
