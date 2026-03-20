@@ -459,6 +459,81 @@ public actor AuthClient {
         return nil
     }
 
+    /// Sign in with a custom OAuth provider configured in the InsForge dashboard.
+    ///
+    /// Use this overload for dashboard-configured custom OAuth providers by
+    /// passing the provider key exactly as configured (e.g. `"auth0-acme"`).
+    /// For built-in providers use ``signInWithOAuthView(provider:redirectTo:)``.
+    ///
+    /// - Parameters:
+    ///   - providerKey: The custom OAuth provider key as configured in the dashboard.
+    ///   - redirectTo: The redirect URI for the OAuth callback.
+    /// - Returns: An `AuthResponse` if the flow completes, or `nil` if an external browser was opened.
+    public func signInWithOAuthView(providerKey: String, redirectTo: String) async throws -> AuthResponse? {
+        let pkce = PKCEHelper.generate()
+        pendingPKCE = pkce
+
+        try await storage.savePKCEVerifier(pkce.codeVerifier)
+        logger.trace("Saved PKCE verifier to storage")
+
+        let endpoint = url
+            .appendingPathComponent("oauth")
+            .appendingPathComponent("custom")
+            .appendingPathComponent(providerKey)
+
+        var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)!
+        components.queryItems = [
+            URLQueryItem(name: "redirect_uri", value: redirectTo),
+            URLQueryItem(name: "code_challenge", value: pkce.codeChallenge)
+        ]
+
+        guard let requestURL = components.url else {
+            logger.error("Failed to construct custom OAuth URL")
+            throw InsForgeError.invalidURL
+        }
+
+        logger.debug("GET \(requestURL.absoluteString)")
+        logger.trace("Request headers: \(headers.filter { $0.key != "Authorization" })")
+
+        let response = try await httpClient.execute(
+            .get,
+            url: requestURL,
+            headers: headers
+        )
+
+        let statusCode = response.response.statusCode
+        logger.debug("Response: \(statusCode)")
+        if let responseString = String(data: response.data, encoding: .utf8) {
+            logger.trace("Response body: \(responseString)")
+        }
+
+        struct OAuthURLResponse: Codable {
+            let authUrl: String
+        }
+
+        let oauthResponse = try response.decode(OAuthURLResponse.self)
+
+        guard let authURL = URL(string: oauthResponse.authUrl) else {
+            logger.error("Invalid authUrl in response: \(oauthResponse.authUrl)")
+            throw InsForgeError.invalidURL
+        }
+
+        logger.debug("Starting custom OAuth session for \(providerKey): \(authURL)")
+
+        let callbackURLScheme = extractURLScheme(from: redirectTo)
+
+        #if canImport(AuthenticationServices) && !os(tvOS)
+        if #available(iOS 12.0, macOS 10.15, *) {
+            let callbackURL = try await performWebAuthSession(url: authURL, callbackURLScheme: callbackURLScheme)
+            return try await handleAuthCallback(callbackURL)
+        }
+        #endif
+
+        logger.debug("ASWebAuthenticationSession not available, falling back to external browser")
+        await openURLInBrowser(authURL)
+        return nil
+    }
+
     /// Sign in using InsForge's default web authentication page with PKCE flow
     /// Uses ASWebAuthenticationSession to present an in-app browser sheet when available (iOS 12+, macOS 10.15+),
     /// falls back to opening external browser on unsupported platforms.
