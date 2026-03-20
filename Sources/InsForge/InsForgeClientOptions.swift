@@ -2,6 +2,7 @@ import Foundation
 import InsForgeCore
 import InsForgeAuth
 import InsForgeDatabase
+import InsForgeRealtime
 import Logging
 
 /// Configuration options for InsForge client
@@ -68,6 +69,7 @@ public struct InsForgeClientOptions: Sendable {
 
     public let database: InsForgeDatabase.DatabaseOptions
     public let auth: InsForgeAuth.AuthOptions
+    public let realtime: InsForgeRealtime.RealtimeOptions
     public let global: GlobalOptions
 
     // MARK: - Initialization
@@ -75,10 +77,12 @@ public struct InsForgeClientOptions: Sendable {
     public init(
         database: InsForgeDatabase.DatabaseOptions = .init(),
         auth: InsForgeAuth.AuthOptions = .init(),
+        realtime: InsForgeRealtime.RealtimeOptions = .init(),
         global: GlobalOptions = .init()
     ) {
         self.database = database
         self.auth = auth
+        self.realtime = realtime
         self.global = global
     }
 }

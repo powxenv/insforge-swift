@@ -3,6 +3,9 @@ import InsForgeCore
 import InsForgeAuth
 import SocketIO
 import Logging
+#if canImport(Network)
+import Network
+#endif
 
 // MARK: - Connection State
 
@@ -11,6 +14,187 @@ public enum ConnectionState: String, Sendable {
     case disconnected
     case connecting
     case connected
+}
+
+// MARK: - Public Options
+
+/// Reconnect configuration for realtime socket behavior.
+public struct RealtimeReconnectOptions: Sendable {
+    public let initialDelay: TimeInterval
+    public let multiplier: Double
+    public let maxDelay: TimeInterval
+    public let maxAttempts: Int
+    public let jitterFactor: Double
+
+    public init(
+        initialDelay: TimeInterval = 1.0,
+        multiplier: Double = 2.0,
+        maxDelay: TimeInterval = 30.0,
+        maxAttempts: Int = 8,
+        jitterFactor: Double = 0.2
+    ) {
+        self.initialDelay = initialDelay
+        self.multiplier = multiplier
+        self.maxDelay = maxDelay
+        self.maxAttempts = maxAttempts
+        self.jitterFactor = jitterFactor
+    }
+}
+
+/// Realtime client options.
+public struct RealtimeOptions: Sendable {
+    public let reconnect: RealtimeReconnectOptions
+    public let connectionTimeout: TimeInterval
+
+    public init(
+        reconnect: RealtimeReconnectOptions = .init(),
+        connectionTimeout: TimeInterval = 10
+    ) {
+        self.reconnect = reconnect
+        self.connectionTimeout = connectionTimeout
+    }
+}
+
+// MARK: - Reconnect Policy
+
+internal struct ReconnectPolicy: Sendable {
+    let initialDelay: TimeInterval
+    let multiplier: Double
+    let maxDelay: TimeInterval
+    let maxAttempts: Int
+    let jitterFactor: Double
+
+    init(
+        initialDelay: TimeInterval,
+        multiplier: Double,
+        maxDelay: TimeInterval,
+        maxAttempts: Int,
+        jitterFactor: Double
+    ) {
+        self.initialDelay = initialDelay
+        self.multiplier = multiplier
+        self.maxDelay = maxDelay
+        self.maxAttempts = maxAttempts
+        self.jitterFactor = jitterFactor
+    }
+
+    static let `default` = ReconnectPolicy(
+        initialDelay: 1.0,
+        multiplier: 2.0,
+        maxDelay: 30.0,
+        maxAttempts: 8,
+        jitterFactor: 0.2
+    )
+
+    init(options: RealtimeReconnectOptions) {
+        self.initialDelay = max(0, options.initialDelay)
+        self.multiplier = max(1, options.multiplier)
+        self.maxDelay = max(0, options.maxDelay)
+        self.maxAttempts = max(0, options.maxAttempts)
+        self.jitterFactor = min(max(0, options.jitterFactor), 1)
+    }
+
+    func baseDelay(forAttempt attempt: Int) -> TimeInterval {
+        let exponent = max(0, attempt - 1)
+        return min(initialDelay * pow(multiplier, Double(exponent)), maxDelay)
+    }
+
+    func applyJitter(to baseDelay: TimeInterval, randomUnit: Double) -> TimeInterval {
+        let clampedRandom = min(max(randomUnit, 0), 1)
+        let jitterRange = jitterFactor * 2
+        let jitterMultiplier = (1 - jitterFactor) + (clampedRandom * jitterRange)
+        return max(0, baseDelay * jitterMultiplier)
+    }
+}
+
+internal enum ReconnectDecision: Equatable {
+    case none
+    case maxedOut
+    case schedule(attempt: Int, baseDelay: TimeInterval)
+}
+
+internal enum NetworkAvailability: Sendable, Equatable {
+    case unknown
+    case available
+    case unavailable
+}
+
+internal struct ReconnectRuntimeState: Sendable {
+    var retryAttempt: Int = 0
+    var shouldMaintainConnection: Bool = false
+    var networkAvailability: NetworkAvailability = .unknown
+    var isManuallyDisconnected: Bool = false
+
+    mutating func prepareForConnectionRequest(resetRetryAttempt: Bool) {
+        if resetRetryAttempt {
+            retryAttempt = 0
+        }
+        shouldMaintainConnection = true
+        isManuallyDisconnected = false
+    }
+
+    mutating func markConnectSucceeded() {
+        retryAttempt = 0
+        shouldMaintainConnection = true
+        isManuallyDisconnected = false
+    }
+
+    mutating func markManualDisconnect() {
+        retryAttempt = 0
+        shouldMaintainConnection = false
+        isManuallyDisconnected = true
+    }
+
+    mutating func applyNetworkAvailability(_ availability: NetworkAvailability) -> (didChange: Bool, becameAvailableFromUnavailable: Bool) {
+        let previousAvailability = networkAvailability
+        networkAvailability = availability
+
+        let becameAvailableFromUnavailable = previousAvailability == .unavailable && availability == .available
+        if becameAvailableFromUnavailable {
+            retryAttempt = 0
+        }
+
+        return (previousAvailability != availability, becameAvailableFromUnavailable)
+    }
+
+    mutating func nextReconnectDecision(
+        policy: ReconnectPolicy,
+        hasPendingReconnectTask: Bool,
+        hasActiveConnectTask: Bool,
+        isSocketConnected: Bool
+    ) -> ReconnectDecision {
+        guard shouldMaintainConnection,
+              !isManuallyDisconnected,
+              networkAvailability != .unavailable,
+              !hasPendingReconnectTask,
+              !hasActiveConnectTask,
+              !isSocketConnected else {
+            return .none
+        }
+
+        guard retryAttempt < policy.maxAttempts else {
+            shouldMaintainConnection = false
+            return .maxedOut
+        }
+
+        retryAttempt += 1
+        let attempt = retryAttempt
+        let baseDelay = policy.baseDelay(forAttempt: attempt)
+        return .schedule(attempt: attempt, baseDelay: baseDelay)
+    }
+}
+
+internal struct ReconnectCoordinatorState: Sendable {
+    var runtime = ReconnectRuntimeState()
+    var connectTask: Task<Void, Error>?
+    var connectTaskToken: UUID?
+    var reconnectTask: Task<Void, Never>?
+    var reconnectTaskToken: UUID?
+}
+
+private struct SocketRuntimeState {
+    var manager: SocketManager?
+    var socket: SocketIOClient?
 }
 
 // MARK: - Subscribe Response
@@ -191,10 +375,19 @@ public final class RealtimeClient: @unchecked Sendable {
     private let headersProvider: LockIsolated<[String: String]>
     private var logger: Logging.Logger { InsForgeLoggerFactory.shared }
 
-    private var manager: SocketManager?
-    private var socket: SocketIOClient?
+    private let socketRuntimeState = LockIsolated<SocketRuntimeState>(SocketRuntimeState())
     private let subscribedChannels = LockIsolated<Set<String>>(Set())
     private let eventListeners = LockIsolated<[String: [UUID: CallbackWrapper<SocketMessage>]]>([:])
+    private let reconnectCoordinator = LockIsolated<ReconnectCoordinatorState>(ReconnectCoordinatorState())
+    private let reconnectPolicy: ReconnectPolicy
+    private let connectionTimeout: TimeInterval
+    private let reconnectErrorDomain = "InsForgeRealtimeReconnect"
+    private let jitterRandomProvider: @Sendable () -> Double
+
+#if canImport(Network)
+    private var networkMonitor: NWPathMonitor?
+    private let networkMonitorQueue = DispatchQueue(label: "com.insforge.realtime.network-monitor")
+#endif
 
     // Connection state callbacks
     private let connectCallbacks = LockIsolated<[UUID: CallbackWrapper<Void>]>([:])
@@ -207,24 +400,36 @@ public final class RealtimeClient: @unchecked Sendable {
     public init(
         url: URL,
         apiKey: String,
-        headersProvider: LockIsolated<[String: String]>
+        headersProvider: LockIsolated<[String: String]>,
+        options: RealtimeOptions = .init()
     ) {
         self.url = url
         self.apiKey = apiKey
         self.headersProvider = headersProvider
+        self.reconnectPolicy = ReconnectPolicy(options: options.reconnect)
+        self.connectionTimeout = max(0, options.connectionTimeout)
+        self.jitterRandomProvider = { Double.random(in: 0...1) }
+        startNetworkMonitoring()
+    }
+
+    deinit {
+        cancelReconnectTask()
+        cancelConnectTask()
+#if canImport(Network)
+        networkMonitor?.cancel()
+#endif
     }
 
     // MARK: - Connection State
 
     /// Check if connected to the realtime server
     public var isConnected: Bool {
-        socket?.status == .connected
+        currentSocketStatus() == .connected
     }
 
     /// Get the current connection state
     public var connectionState: ConnectionState {
-        guard let socket = socket else { return .disconnected }
-        switch socket.status {
+        switch currentSocketStatus() {
         case .connected: return .connected
         case .connecting: return .connecting
         default: return .disconnected
@@ -233,82 +438,75 @@ public final class RealtimeClient: @unchecked Sendable {
 
     /// Get the socket ID (if connected)
     public var socketId: String? {
-        socket?.sid
+        currentSocket()?.sid
     }
 
     // MARK: - Connection
 
     /// Connect to the realtime server
     public func connect() async throws {
+        try await connect(resetRetryBudget: true)
+    }
+
+    private func connect(resetRetryBudget: Bool) async throws {
         // Already connected
-        if socket?.status == .connected {
+        if currentSocketStatus() == .connected {
             logger.debug("Already connected, skipping connect()")
             return
         }
 
-        // Get current auth token
-        let headers = headersProvider.value
-        let authToken = headers["Authorization"]?.replacingOccurrences(of: "Bearer ", with: "") ?? apiKey
+        cancelReconnectTask()
 
-        logger.debug("Connecting to: \(url.absoluteString)")
-        logger.trace("Auth token: \(String(authToken.prefix(20)))...")
+        let invocation = reconnectCoordinator.withValue { coordinator -> (task: Task<Void, Error>, token: UUID, isOwner: Bool) in
+            coordinator.runtime.prepareForConnectionRequest(resetRetryAttempt: resetRetryBudget)
 
-        // Create Socket.IO manager with WebSocket transport
-        let config: SocketIOClientConfiguration = [
-            .log(false),
-            .compress,
-            .forceWebsockets(true)
-        ]
+            if let existingTask = coordinator.connectTask,
+               let existingToken = coordinator.connectTaskToken {
+                return (existingTask, existingToken, false)
+            }
 
-        manager = SocketManager(socketURL: url, config: config)
-        socket = manager?.defaultSocket
+            let token = UUID()
+            let task = Task { [weak self] in
+                guard let self = self else { return }
+                try await self.performConnectAttempt()
+            }
 
-        guard let socket = socket else {
-            logger.error("Failed to create socket")
-            throw InsForgeError.unknown("Failed to create socket")
+            coordinator.connectTask = task
+            coordinator.connectTaskToken = token
+            return (task, token, true)
         }
 
-        // Set up event handlers
-        setupEventHandlers(socket)
-
-        // Connect and wait for result
-        let authPayload = ["token": authToken]
-
-        return try await withCheckedThrowingContinuation { [weak self] continuation in
-            var resumed = false
-
-            socket.on(clientEvent: .connect) { [weak self] _, _ in
-                guard !resumed else { return }
-                resumed = true
-                self?.logDebug("Connected successfully, Socket ID: \(socket.sid ?? "unknown")")
-
-                // Re-subscribe to channels on connect/reconnect
-                self?.resubscribeToChannels()
-                self?.notifyConnect()
-
-                continuation.resume()
+        do {
+            try await invocation.task.value
+            if invocation.isOwner {
+                clearConnectTaskIfNeeded(token: invocation.token)
             }
-
-            socket.on(clientEvent: .error) { [weak self] data, _ in
-                guard !resumed else { return }
-                resumed = true
-                let errorMessage = (data.first as? String) ?? "Unknown connection error"
-                let error = NSError(domain: "RealtimeClient", code: -1,
-                    userInfo: [NSLocalizedDescriptionKey: errorMessage])
-                self?.logError("Connection error: \(errorMessage)")
-                continuation.resume(throwing: error)
+        } catch {
+            if invocation.isOwner {
+                clearConnectTaskIfNeeded(token: invocation.token)
+                if !(error is CancellationError) {
+                    notifyConnectError(error)
+                    scheduleReconnect(reason: "connect_failed")
+                }
             }
-
-            socket.connect(withPayload: authPayload)
+            throw error
         }
     }
 
     /// Disconnect from the realtime server
     public func disconnect() {
         logger.debug("Disconnecting...")
-        socket?.disconnect()
-        socket = nil
-        manager = nil
+
+        reconnectCoordinator.withValue { coordinator in
+            coordinator.runtime.markManualDisconnect()
+        }
+
+        cancelReconnectTask()
+        cancelConnectTask()
+
+        let socketToDisconnect = clearSocketRuntimeState()
+        socketToDisconnect?.disconnect()
+        socketToDisconnect?.removeAllHandlers()
         subscribedChannels.setValue(Set())
         logger.debug("Disconnected")
     }
@@ -316,11 +514,21 @@ public final class RealtimeClient: @unchecked Sendable {
     // MARK: - Event Handlers Setup
 
     private func setupEventHandlers(_ socket: SocketIOClient) {
+        // Handle connect
+        socket.on(clientEvent: .connect) { [weak self] _, _ in
+            self?.handleSocketConnected()
+        }
+
         // Handle disconnect
         socket.on(clientEvent: .disconnect) { [weak self] data, _ in
             let reason = (data.first as? String) ?? "unknown"
-            self?.logDebug("[<<<] disconnect: \(reason)")
-            self?.notifyDisconnect(reason)
+            self?.handleSocketDisconnected(reason: reason)
+        }
+
+        // Handle connection errors
+        socket.on(clientEvent: .error) { [weak self] data, _ in
+            let error = Self.connectionError(from: data)
+            self?.logError("[<<<] error: \(error.localizedDescription)")
         }
 
         // Handle reconnect attempts
@@ -364,7 +572,10 @@ public final class RealtimeClient: @unchecked Sendable {
             guard !event.event.starts(with: "realtime:"),
                   event.event != "connect",
                   event.event != "disconnect",
-                  event.event != "error" else {
+                  event.event != "error",
+                  event.event != "reconnect",
+                  event.event != "reconnectAttempt",
+                  event.event != "statusChange" else {
                 return
             }
 
@@ -386,7 +597,7 @@ public final class RealtimeClient: @unchecked Sendable {
         }
 
         // Auto-connect if not connected
-        if socket?.status != .connected {
+        if currentSocketStatus() != .connected {
             do {
                 try await connect()
             } catch {
@@ -395,7 +606,7 @@ public final class RealtimeClient: @unchecked Sendable {
             }
         }
 
-        guard let socket = socket else {
+        guard let socket = currentSocket() else {
             return .failure(channel: channel, code: "NO_SOCKET", message: "Socket not initialized")
         }
 
@@ -419,7 +630,7 @@ public final class RealtimeClient: @unchecked Sendable {
                 }
 
                 if let ok = response["ok"] as? Bool, ok {
-                    self?.subscribedChannels.withValue { $0.insert(channel) }
+                    _ = self?.subscribedChannels.withValue { $0.insert(channel) }
                     continuation.resume(returning: .success(channel: channel))
                 } else if let error = response["error"] as? [String: Any],
                           let code = error["code"] as? String,
@@ -435,12 +646,12 @@ public final class RealtimeClient: @unchecked Sendable {
     /// Unsubscribe from a channel (fire-and-forget)
     /// - Parameter channel: Channel name to unsubscribe from
     public func unsubscribe(from channel: String) {
-        subscribedChannels.withValue { $0.remove(channel) }
+        _ = subscribedChannels.withValue { $0.remove(channel) }
 
-        if socket?.status == .connected {
+        if let socket = connectedSocketForIO() {
             let unsubscribePayload = ["channel": channel]
             logger.debug("[>>>] realtime:unsubscribe: \(unsubscribePayload)")
-            socket?.emit("realtime:unsubscribe", unsubscribePayload)
+            socket.emit("realtime:unsubscribe", unsubscribePayload)
         }
     }
 
@@ -452,7 +663,7 @@ public final class RealtimeClient: @unchecked Sendable {
     ///   - event: Event name
     ///   - payload: Message payload
     public func publish(to channel: String, event: String, payload: [String: Any]) throws {
-        guard socket?.status == .connected else {
+        guard let socket = connectedSocketForIO() else {
             throw InsForgeError.unknown("Not connected to realtime server. Call connect() first.")
         }
 
@@ -463,7 +674,7 @@ public final class RealtimeClient: @unchecked Sendable {
         ]
 
         logger.debug("[>>>] realtime:publish: \(publishPayload)")
-        socket?.emit("realtime:publish", publishPayload)
+        socket.emit("realtime:publish", publishPayload)
     }
 
     /// Publish a message with Encodable payload
@@ -506,7 +717,7 @@ public final class RealtimeClient: @unchecked Sendable {
 
     /// Remove all listeners for an event
     public func offAll(_ event: String) {
-        eventListeners.withValue { $0.removeValue(forKey: event) }
+        _ = eventListeners.withValue { $0.removeValue(forKey: event) }
     }
 
     // MARK: - Connection Event Listeners
@@ -556,12 +767,400 @@ public final class RealtimeClient: @unchecked Sendable {
 
     // MARK: - Private Methods
 
+    private func currentSocket() -> SocketIOClient? {
+        socketRuntimeState.value.socket
+    }
+
+    private func currentSocketStatus() -> SocketIOStatus {
+        socketRuntimeState.value.socket?.status ?? .disconnected
+    }
+
+    private func connectedSocketForIO() -> SocketIOClient? {
+        socketRuntimeState.withValue { state in
+            guard state.socket?.status == .connected else {
+                return nil
+            }
+            return state.socket
+        }
+    }
+
+    private func clearSocketRuntimeState() -> SocketIOClient? {
+        socketRuntimeState.withValue { state in
+            let activeSocket = state.socket
+            state.socket = nil
+            state.manager = nil
+            return activeSocket
+        }
+    }
+
+    private func initializeSocketRuntimeIfNeeded(manager: SocketManager, socket: SocketIOClient) -> SocketIOClient {
+        socketRuntimeState.withValue { state in
+            if let existingSocket = state.socket {
+                return existingSocket
+            }
+
+            state.manager = manager
+            state.socket = socket
+            return socket
+        }
+    }
+
+    private func currentAuthToken() -> String {
+        let headers = headersProvider.value
+        return headers["Authorization"]?.replacingOccurrences(of: "Bearer ", with: "") ?? apiKey
+    }
+
+    private func performConnectAttempt() async throws {
+        let runtimeState = reconnectCoordinator.value.runtime
+        guard runtimeState.networkAvailability != .unavailable else {
+            throw NSError(
+                domain: reconnectErrorDomain,
+                code: -1009,
+                userInfo: [NSLocalizedDescriptionKey: "Network is unavailable. Waiting for connectivity to resume."]
+            )
+        }
+
+        let socket = try ensureSocketInitialized()
+        let authToken = currentAuthToken()
+        let authPayload = ["token": authToken]
+
+        logDebug("Connecting to: \(url.absoluteString)")
+        logTrace("Auth token: \(String(authToken.prefix(20)))...")
+
+        let cancellationHook = LockIsolated<(() -> Void)?>(nil)
+        try await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation { [weak self] (continuation: CheckedContinuation<Void, Error>) in
+                guard let self = self else {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+
+                struct ConnectAttemptCompletionState {
+                    var completed = false
+                    var connectHandlerId: UUID?
+                    var errorHandlerId: UUID?
+                }
+                let completionState = LockIsolated(ConnectAttemptCompletionState())
+
+                func complete(with result: Result<Void, Error>) {
+                    let handlerIds = completionState.withValue { state -> (UUID?, UUID?)? in
+                        guard !state.completed else { return nil }
+                        state.completed = true
+                        return (state.connectHandlerId, state.errorHandlerId)
+                    }
+
+                    guard let handlerIds else { return }
+                    cancellationHook.setValue(nil)
+
+                    if let connectHandlerId = handlerIds.0 {
+                        socket.off(id: connectHandlerId)
+                    }
+
+                    if let errorHandlerId = handlerIds.1 {
+                        socket.off(id: errorHandlerId)
+                    }
+
+                    switch result {
+                    case .success:
+                        continuation.resume()
+                    case .failure(let error):
+                        continuation.resume(throwing: error)
+                    }
+                }
+
+                let connectHandlerId = socket.on(clientEvent: .connect) { _, _ in
+                    complete(with: .success(()))
+                }
+                completionState.withValue { $0.connectHandlerId = connectHandlerId }
+
+                let errorHandlerId = socket.on(clientEvent: .error) { data, _ in
+                    complete(with: .failure(Self.connectionError(from: data)))
+                }
+                completionState.withValue { $0.errorHandlerId = errorHandlerId }
+
+                cancellationHook.setValue {
+                    complete(with: .failure(CancellationError()))
+                }
+
+                if Task.isCancelled {
+                    complete(with: .failure(CancellationError()))
+                    return
+                }
+
+                socket.connect(withPayload: authPayload, timeoutAfter: self.connectionTimeout) {
+                    complete(with: .failure(
+                        NSError(
+                            domain: self.reconnectErrorDomain,
+                            code: -1001,
+                            userInfo: [NSLocalizedDescriptionKey: "Connection timed out after \(Int(self.connectionTimeout)) seconds."]
+                        )
+                    ))
+                }
+            }
+        }, onCancel: {
+            let hook = cancellationHook.withValue { hook -> (() -> Void)? in
+                let activeHook = hook
+                hook = nil
+                return activeHook
+            }
+            hook?()
+        })
+    }
+
+    private func ensureSocketInitialized() throws -> SocketIOClient {
+        if let socket = currentSocket() {
+            return socket
+        }
+
+        let config: SocketIOClientConfiguration = [
+            .log(false),
+            .compress,
+            .forceWebsockets(true),
+            .reconnects(false)
+        ]
+
+        let manager = SocketManager(socketURL: url, config: config)
+        let newSocket = manager.defaultSocket
+
+        setupEventHandlers(newSocket)
+        let activeSocket = initializeSocketRuntimeIfNeeded(manager: manager, socket: newSocket)
+        if activeSocket !== newSocket {
+            newSocket.removeAllHandlers()
+            newSocket.disconnect()
+        }
+        return activeSocket
+    }
+
+    private func clearConnectTaskIfNeeded(token: UUID) {
+        reconnectCoordinator.withValue { coordinator in
+            guard coordinator.connectTaskToken == token else { return }
+            coordinator.connectTask = nil
+            coordinator.connectTaskToken = nil
+        }
+    }
+
+    private func clearReconnectTaskIfNeeded(token: UUID) {
+        reconnectCoordinator.withValue { coordinator in
+            guard coordinator.reconnectTaskToken == token else { return }
+            coordinator.reconnectTask = nil
+            coordinator.reconnectTaskToken = nil
+        }
+    }
+
+    private func cancelConnectTask() {
+        let task = reconnectCoordinator.withValue { coordinator -> Task<Void, Error>? in
+            let activeTask = coordinator.connectTask
+            coordinator.connectTask = nil
+            coordinator.connectTaskToken = nil
+            return activeTask
+        }
+
+        task?.cancel()
+    }
+
+    private func cancelReconnectTask() {
+        let task = reconnectCoordinator.withValue { coordinator -> Task<Void, Never>? in
+            let activeTask = coordinator.reconnectTask
+            coordinator.reconnectTask = nil
+            coordinator.reconnectTaskToken = nil
+            return activeTask
+        }
+
+        task?.cancel()
+    }
+
+    private func scheduleReconnect(reason: String) {
+        struct ReconnectScheduleReservation {
+            let token: UUID
+            let attempt: Int
+            let delay: TimeInterval
+        }
+
+        var scheduledAttempt: Int?
+        var scheduledDelay: TimeInterval?
+        var shouldEmitMaxRetryError = false
+        var reservation: ReconnectScheduleReservation?
+        let isSocketConnected = currentSocketStatus() == .connected
+
+        reconnectCoordinator.withValue { coordinator in
+            let decision = coordinator.runtime.nextReconnectDecision(
+                policy: reconnectPolicy,
+                hasPendingReconnectTask: coordinator.reconnectTask != nil || coordinator.reconnectTaskToken != nil,
+                hasActiveConnectTask: coordinator.connectTask != nil,
+                isSocketConnected: isSocketConnected
+            )
+
+            switch decision {
+            case .none:
+                return
+            case .maxedOut:
+                shouldEmitMaxRetryError = true
+            case .schedule(let attempt, let baseDelay):
+                let delay = computeReconnectDelay(baseDelay: baseDelay)
+                let token = UUID()
+
+                coordinator.reconnectTaskToken = token
+                coordinator.reconnectTask = nil
+                reservation = ReconnectScheduleReservation(token: token, attempt: attempt, delay: delay)
+                scheduledAttempt = attempt
+                scheduledDelay = delay
+            }
+        }
+
+        if let reservation {
+            let reconnectTask = Task { [weak self] in
+                guard let self = self else { return }
+
+                do {
+                    try await Task.sleep(nanoseconds: UInt64(reservation.delay * 1_000_000_000))
+                } catch {
+                    return
+                }
+
+                self.clearReconnectTaskIfNeeded(token: reservation.token)
+
+                do {
+                    try await self.connect(resetRetryBudget: false)
+                } catch {
+                    guard !(error is CancellationError) else { return }
+                    self.logError("Reconnect attempt \(reservation.attempt) failed: \(error.localizedDescription)")
+                    self.scheduleReconnect(reason: "reconnect_attempt_\(reservation.attempt)_failed")
+                }
+            }
+
+            let didAttach = reconnectCoordinator.withValue { coordinator -> Bool in
+                guard coordinator.reconnectTaskToken == reservation.token,
+                      coordinator.reconnectTask == nil else {
+                    return false
+                }
+
+                coordinator.reconnectTask = reconnectTask
+                return true
+            }
+
+            if !didAttach {
+                reconnectTask.cancel()
+            }
+        }
+
+        if let scheduledAttempt, let scheduledDelay {
+            logDebug(
+                "Scheduling reconnect attempt \(scheduledAttempt)/\(reconnectPolicy.maxAttempts) " +
+                "in \(String(format: "%.2f", scheduledDelay))s (reason: \(reason))"
+            )
+        }
+
+        if shouldEmitMaxRetryError {
+            emitMaxReconnectAttemptsError()
+        }
+    }
+
+    private func computeReconnectDelay(baseDelay: TimeInterval) -> TimeInterval {
+        reconnectPolicy.applyJitter(to: baseDelay, randomUnit: jitterRandomProvider())
+    }
+
+    private func handleSocketConnected() {
+        let reconnectTaskToCancel = reconnectCoordinator.withValue { coordinator -> Task<Void, Never>? in
+            coordinator.runtime.markConnectSucceeded()
+            let activeReconnectTask = coordinator.reconnectTask
+            coordinator.reconnectTask = nil
+            coordinator.reconnectTaskToken = nil
+            return activeReconnectTask
+        }
+
+        reconnectTaskToCancel?.cancel()
+        logDebug("Connected successfully, Socket ID: \(currentSocket()?.sid ?? "unknown")")
+        resubscribeToChannels()
+        notifyConnect()
+    }
+
+    private func handleSocketDisconnected(reason: String) {
+        logDebug("[<<<] disconnect: \(reason)")
+        notifyDisconnect(reason)
+
+        let shouldReconnect = reconnectCoordinator.withValue { coordinator in
+            coordinator.runtime.shouldMaintainConnection &&
+            !coordinator.runtime.isManuallyDisconnected
+        }
+
+        guard shouldReconnect else {
+            return
+        }
+
+        scheduleReconnect(reason: "disconnect_\(reason)")
+    }
+
+    private func emitMaxReconnectAttemptsError() {
+        let payload = RealtimeErrorPayload(
+            channel: nil,
+            code: "MAX_RECONNECT_ATTEMPTS",
+            message: "Reconnect exhausted after \(reconnectPolicy.maxAttempts) attempts."
+        )
+        logError(payload.message)
+        notifyError(payload)
+    }
+
+    private func handleNetworkAvailabilityChange(_ availability: NetworkAvailability) {
+        let transition = reconnectCoordinator.withValue { coordinator in
+            coordinator.runtime.applyNetworkAvailability(availability)
+        }
+
+        guard transition.didChange else { return }
+
+        switch availability {
+        case .available:
+            if transition.becameAvailableFromUnavailable {
+                logDebug("Network restored. Reconnect retry counter reset.")
+            }
+            logDebug("Network is reachable. Evaluating pending reconnect flow.")
+            scheduleReconnect(reason: "network_available")
+        case .unavailable:
+            logDebug("Network is unavailable. Pausing reconnect attempts.")
+            cancelReconnectTask()
+        case .unknown:
+            break
+        }
+    }
+
+    private func startNetworkMonitoring() {
+#if canImport(Network)
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            let availability: NetworkAvailability = path.status == .satisfied ? .available : .unavailable
+            self?.handleNetworkAvailabilityChange(availability)
+        }
+        monitor.start(queue: networkMonitorQueue)
+        networkMonitor = monitor
+#endif
+    }
+
+    private static func connectionError(from data: [Any]) -> Error {
+        if let error = data.first as? Error {
+            return error
+        }
+
+        if let message = data.first as? String {
+            return NSError(
+                domain: "RealtimeClient",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: message]
+            )
+        }
+
+        return NSError(
+            domain: "RealtimeClient",
+            code: -1,
+            userInfo: [NSLocalizedDescriptionKey: "Unknown connection error."]
+        )
+    }
+
     private func resubscribeToChannels() {
+        guard let socket = connectedSocketForIO() else { return }
         let channels = subscribedChannels.value
         for channel in channels {
             let payload = ["channel": channel]
             logger.debug("[>>>] realtime:subscribe (re-subscribe): \(payload)")
-            socket?.emit("realtime:subscribe", payload)
+            socket.emit("realtime:subscribe", payload)
         }
     }
 
@@ -630,6 +1229,14 @@ public final class RealtimeClient: @unchecked Sendable {
 
     private func notifyError(_ error: RealtimeErrorPayload) {
         errorCallbacks.withValue { callbacks in
+            for (_, wrapper) in callbacks {
+                wrapper.callback(error)
+            }
+        }
+    }
+
+    private func notifyConnectError(_ error: Error) {
+        connectErrorCallbacks.withValue { callbacks in
             for (_, wrapper) in callbacks {
                 wrapper.callback(error)
             }

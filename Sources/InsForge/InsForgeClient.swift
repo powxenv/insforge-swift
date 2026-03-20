@@ -228,7 +228,8 @@ public final class InsForgeClient: Sendable {
                 state.realtime = RealtimeClient(
                     url: baseURL,
                     apiKey: anonKey,
-                    headersProvider: _headers
+                    headersProvider: _headers,
+                    options: options.realtime
                 )
             }
             return state.realtime!

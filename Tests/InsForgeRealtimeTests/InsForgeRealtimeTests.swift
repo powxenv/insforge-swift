@@ -244,6 +244,46 @@ final class InsForgeRealtimeTests: XCTestCase {
         }
     }
 
+    func testDisconnectCancelsInflightConnectWithoutHanging() async throws {
+        let client = TestHelper.createClient(
+            options: InsForgeClientOptions(
+                realtime: RealtimeOptions(connectionTimeout: 30)
+            )
+        )
+
+        let connectTask = Task {
+            do {
+                try await client.realtime.connect()
+                return true
+            } catch {
+                return false
+            }
+        }
+
+        try await Task.sleep(nanoseconds: 200_000_000) // 0.2s
+        client.realtime.disconnect()
+
+        let finishedWithinTimeout = await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                _ = await connectTask.value
+                return true
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: 1_000_000_000) // 1s timeout guard
+                return false
+            }
+
+            let firstResult = await group.next() ?? false
+            group.cancelAll()
+            return firstResult
+        }
+
+        XCTAssertTrue(
+            finishedWithinTimeout,
+            "connect() should resolve promptly when disconnect() cancels an in-flight connection attempt"
+        )
+    }
+
     func testSubscribeToChannel() async throws {
         let client = TestHelper.createClient()
 
