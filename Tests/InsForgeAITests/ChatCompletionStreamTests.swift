@@ -398,9 +398,10 @@ final class ChatCompletionStreamTests: XCTestCase {
 
     // MARK: - Multi-Chunk SSE Simulation
 
-    /// Simulate parsing a complete SSE stream with multiple events
+    /// Simulate parsing a complete SSE stream with buffered multi-line event support
     func testFullSSEStreamParsing() throws {
-        // Simulated SSE lines as they arrive from the server (no leading whitespace)
+        // Simulated SSE lines as they arrive from the server.
+        // Each event consists of "data:" line(s) followed by a blank line.
         let sseLines = [
             "data: {\"id\":\"1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}",
             "",
@@ -410,7 +411,8 @@ final class ChatCompletionStreamTests: XCTestCase {
             "",
             "data: {\"id\":\"1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"content\":\"!\"},\"finish_reason\":\"stop\"}]}",
             "",
-            "data: [DONE]"
+            "data: [DONE]",
+            ""
         ]
 
         struct SSEChunk: Decodable {
@@ -431,13 +433,24 @@ final class ChatCompletionStreamTests: XCTestCase {
             let content: String?
         }
 
+        // Use the same buffered parsing logic as the implementation
+        var dataBuffer: [String] = []
         var chunks: [ChatCompletionChunk] = []
+        var receivedTerminal = false
 
         for line in sseLines {
-            guard line.hasPrefix("data: ") else { continue }
-            let payload = String(line.dropFirst(6))
+            if line.hasPrefix("data: ") {
+                dataBuffer.append(String(line.dropFirst(6)))
+                continue
+            }
+
+            guard line.isEmpty, !dataBuffer.isEmpty else { continue }
+
+            let payload = dataBuffer.joined(separator: "\n")
+            dataBuffer.removeAll()
 
             if payload == "[DONE]" {
+                receivedTerminal = true
                 chunks.append(ChatCompletionChunk(text: "", isFinished: true))
                 break
             }
@@ -455,11 +468,15 @@ final class ChatCompletionStreamTests: XCTestCase {
                 model: sseChunk.model
             ))
 
-            if isFinished { break }
+            if isFinished {
+                receivedTerminal = true
+                break
+            }
         }
 
         // Should have 4 chunks (role-only + "Hello" + " world" + "!" with finish)
         XCTAssertEqual(chunks.count, 4)
+        XCTAssertTrue(receivedTerminal)
 
         // First chunk has empty text (role-only delta)
         XCTAssertEqual(chunks[0].text, "")
@@ -481,4 +498,139 @@ final class ChatCompletionStreamTests: XCTestCase {
         let fullText = chunks.map(\.text).joined()
         XCTAssertEqual(fullText, "Hello world!")
     }
-}
+
+    // MARK: - Multi-Line SSE Data Event Tests
+
+    /// Test that a single SSE event spanning multiple data: lines is correctly buffered and joined
+    func testMultiLineSSEDataEvent() {
+        // SSE spec allows multiple data: lines in one event, joined by newlines.
+        let sseLines = [
+            "data: {\"id\":\"1\",\"model\":\"gpt-4o\",",
+            "data: \"choices\":[{\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}",
+            ""
+        ]
+
+        var dataBuffer: [String] = []
+        var decodedPayload: String?
+
+        for line in sseLines {
+            if line.hasPrefix("data: ") {
+                dataBuffer.append(String(line.dropFirst(6)))
+                continue
+            }
+            guard line.isEmpty, !dataBuffer.isEmpty else { continue }
+            decodedPayload = dataBuffer.joined(separator: "\n")
+            dataBuffer.removeAll()
+        }
+
+        // The two data: lines should be joined with a newline
+        XCTAssertNotNil(decodedPayload)
+        XCTAssertTrue(decodedPayload!.contains("\"id\":\"1\""))
+        XCTAssertTrue(decodedPayload!.contains("\"content\":\"Hi\""))
+    }
+
+    // MARK: - Truncated Stream Detection Tests
+
+    /// Test that a stream ending without finish_reason or [DONE] is detected as truncated
+    func testTruncatedStreamDetection() {
+        // Server drops connection after partial content — no finish_reason, no [DONE]
+        let sseLines = [
+            "data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}",
+            "",
+            "data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}",
+            ""
+            // Stream ends here — truncated
+        ]
+
+        struct SSEChunk: Decodable {
+            let choices: [SSEChoice]
+        }
+        struct SSEChoice: Decodable {
+            let delta: SSEDelta
+            let finishReason: String?
+            enum CodingKeys: String, CodingKey {
+                case delta
+                case finishReason = "finish_reason"
+            }
+        }
+        struct SSEDelta: Decodable {
+            let content: String?
+        }
+
+        var dataBuffer: [String] = []
+        var receivedTerminal = false
+
+        for line in sseLines {
+            if line.hasPrefix("data: ") {
+                dataBuffer.append(String(line.dropFirst(6)))
+                continue
+            }
+            guard line.isEmpty, !dataBuffer.isEmpty else { continue }
+
+            let payload = dataBuffer.joined(separator: "\n")
+            dataBuffer.removeAll()
+
+            if payload == "[DONE]" { receivedTerminal = true; break }
+
+            guard let chunkData = payload.data(using: .utf8),
+                  let sseChunk = try? JSONDecoder().decode(SSEChunk.self, from: chunkData)
+            else { continue }
+
+            if sseChunk.choices.first?.finishReason != nil {
+                receivedTerminal = true
+                break
+            }
+        }
+
+        XCTAssertFalse(receivedTerminal, "Truncated stream should NOT be marked as complete")
+    }
+
+    /// Test that a stream with finish_reason is correctly marked as complete
+    func testCompleteStreamDetection() {
+        let sseLines = [
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Done\"},\"finish_reason\":\"stop\"}]}",
+            ""
+        ]
+
+        struct SSEChunk: Decodable {
+            let choices: [SSEChoice]
+        }
+        struct SSEChoice: Decodable {
+            let delta: SSEDelta
+            let finishReason: String?
+            enum CodingKeys: String, CodingKey {
+                case delta
+                case finishReason = "finish_reason"
+            }
+        }
+        struct SSEDelta: Decodable {
+            let content: String?
+        }
+
+        var dataBuffer: [String] = []
+        var receivedTerminal = false
+
+        for line in sseLines {
+            if line.hasPrefix("data: ") {
+                dataBuffer.append(String(line.dropFirst(6)))
+                continue
+            }
+            guard line.isEmpty, !dataBuffer.isEmpty else { continue }
+
+            let payload = dataBuffer.joined(separator: "\n")
+            dataBuffer.removeAll()
+
+            if payload == "[DONE]" { receivedTerminal = true; break }
+
+            guard let chunkData = payload.data(using: .utf8),
+                  let sseChunk = try? JSONDecoder().decode(SSEChunk.self, from: chunkData)
+            else { continue }
+
+            if sseChunk.choices.first?.finishReason != nil {
+                receivedTerminal = true
+                break
+            }
+        }
+
+        XCTAssertTrue(receivedTerminal, "Stream with finish_reason should be marked as complete")
+    }

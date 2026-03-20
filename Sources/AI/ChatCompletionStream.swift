@@ -194,18 +194,33 @@ extension AIClient {
                         }
 
                         // ── Parse SSE events ─────────────────────────────────
+                        // SSE spec: an event can span multiple "data:" lines.
+                        // Lines are buffered until a blank line signals the end
+                        // of the event. The buffered data lines are then joined
+                        // with newlines and decoded as a single JSON payload.
+                        var dataBuffer: [String] = []
+                        var receivedTerminal = false
+
                         for try await line in bytes.lines {
-                            // SSE spec: data lines begin with "data: "
-                            guard line.hasPrefix("data: ") else { continue }
-                            let payload = String(line.dropFirst(6))
+                            if line.hasPrefix("data: ") {
+                                dataBuffer.append(String(line.dropFirst(6)))
+                                continue
+                            }
+
+                            // Blank line = end of SSE event; flush the buffer.
+                            guard line.isEmpty, !dataBuffer.isEmpty else { continue }
+
+                            let payload = dataBuffer.joined(separator: "\n")
+                            dataBuffer.removeAll()
 
                             // End-of-stream sentinel
                             if payload == "[DONE]" {
+                                receivedTerminal = true
                                 continuation.yield(ChatCompletionChunk(text: "", isFinished: true))
                                 break
                             }
 
-                            // Decode the JSON chunk; skip any lines that don't parse.
+                            // Decode the JSON chunk; skip payloads that don't parse.
                             guard let chunkData = payload.data(using: .utf8),
                                   let sseChunk = try? JSONDecoder().decode(SSEChunk.self, from: chunkData)
                             else { continue }
@@ -219,10 +234,21 @@ extension AIClient {
                                 model: sseChunk.model
                             ))
 
-                            if isFinished { break }
+                            if isFinished {
+                                receivedTerminal = true
+                                break
+                            }
                         }
 
-                        continuation.finish()
+                        // If the byte stream ended without a terminal signal
+                        // the response was truncated (server/proxy/network drop).
+                        if receivedTerminal {
+                            continuation.finish()
+                        } else {
+                            continuation.finish(throwing: InsForgeError.networkError(
+                                .other("Stream ended without a terminal signal; response may be truncated")
+                            ))
+                        }
                         return
                     }
 
