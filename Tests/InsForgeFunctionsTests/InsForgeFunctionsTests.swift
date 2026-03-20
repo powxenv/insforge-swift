@@ -34,6 +34,29 @@ final class InsForgeFunctionsTests: XCTestCase {
         insForgeClient = nil
     }
 
+    private func derivedFunctionsURL() throws -> URL {
+        guard let host = TestHelper.baseURL.host else {
+            throw XCTSkip("Test base URL has no host")
+        }
+
+        let hostComponents = host.split(separator: ".")
+        guard let appKey = hostComponents.first else {
+            throw XCTSkip("Could not derive functions URL from host")
+        }
+
+        var components = URLComponents(url: TestHelper.baseURL, resolvingAgainstBaseURL: false)
+        components?.host = "\(appKey).functions.insforge.app"
+        components?.path = ""
+        components?.query = nil
+        components?.fragment = nil
+
+        guard let url = components?.url else {
+            throw XCTSkip("Could not construct functions URL")
+        }
+
+        return url
+    }
+
     // MARK: - Tests
 
     func testFunctionsClientInitialization() async {
@@ -132,6 +155,40 @@ final class InsForgeFunctionsTests: XCTestCase {
                 throw error
             }
         }
+    }
+
+    /// Test invoking a function with a custom HTTP method.
+    func testInvokeHelloFunctionWithGETMethod() async throws {
+        struct HelloResponse: Decodable {
+            let message: String
+        }
+
+        let response: HelloResponse = try await insForgeClient.functions.invoke(
+            "hello",
+            options: FunctionInvokeOptions(method: .get)
+        )
+
+        XCTAssertFalse(response.message.isEmpty)
+        print("✅ Hello function GET response: \(response.message)")
+    }
+
+    /// Test invoking through an explicit subhosting URL and falling back to the proxy on 404.
+    func testInvokeHelloFunctionWithSubhostingFallback() async throws {
+        struct HelloResponse: Decodable {
+            let message: String
+        }
+
+        let client = TestHelper.createClient(
+            options: InsForgeClientOptions(
+                functions: FunctionsOptions(
+                    url: try derivedFunctionsURL()
+                )
+            )
+        )
+
+        let response: HelloResponse = try await client.functions.invoke("hello")
+        XCTAssertFalse(response.message.isEmpty)
+        print("✅ Hello function with subhosting fallback response: \(response.message)")
     }
 
     /// Test error handling for non-existent function

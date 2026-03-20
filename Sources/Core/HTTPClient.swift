@@ -23,7 +23,7 @@ public protocol TokenRefreshHandler: Sendable {
 }
 
 /// HTTP method types supported by the client.
-public enum HTTPMethod: String {
+public enum HTTPMethod: String, Sendable {
     /// HTTP GET method.
     case get = "GET"
     /// HTTP POST method.

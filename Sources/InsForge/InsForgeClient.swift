@@ -58,6 +58,9 @@ public final class InsForgeClient: Sendable {
     /// Token refresh handler for automatic 401 retry
     private let _tokenRefreshHandler: AuthTokenRefreshHandler
 
+    /// Direct functions URL used for subhosting-first invocation.
+    private let directFunctionsURL: URL?
+
     // MARK: - Sub-clients
 
     private let _auth: AuthClient
@@ -118,6 +121,7 @@ public final class InsForgeClient: Sendable {
             authClient: self._auth,
             headersProvider: self._headers
         )
+        self.directFunctionsURL = Self.resolveFunctionsURL(baseURL: baseURL, options: options.functions)
 
         // Capture logger for use in closure
         let log = self.logger
@@ -191,6 +195,7 @@ public final class InsForgeClient: Sendable {
             if state.functions == nil {
                 state.functions = FunctionsClient(
                     url: baseURL.appendingPathComponent("functions"),
+                    directURL: directFunctionsURL,
                     headersProvider: _headers,
                     tokenRefreshHandler: _tokenRefreshHandler
                 )
@@ -233,4 +238,30 @@ public final class InsForgeClient: Sendable {
     // MARK: - Version
 
     static let version = "0.0.6"
+
+    private static func resolveFunctionsURL(baseURL: URL, options: FunctionsOptions) -> URL? {
+        if let url = options.url {
+            return url
+        }
+
+        guard options.useSubhosting else {
+            return nil
+        }
+
+        guard let host = baseURL.host, host.hasSuffix(".insforge.app") else {
+            return nil
+        }
+
+        let hostComponents = host.split(separator: ".")
+        guard let appKey = hostComponents.first, !appKey.isEmpty else {
+            return nil
+        }
+
+        var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
+        components?.host = "\(appKey).functions.insforge.app"
+        components?.path = ""
+        components?.query = nil
+        components?.fragment = nil
+        return components?.url
+    }
 }

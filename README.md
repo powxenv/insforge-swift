@@ -171,6 +171,9 @@ let downloadStrategy = try await client.storage
 ### Functions
 
 ```swift
+import InsForge
+import InsForgeFunctions
+
 // Invoke a function
 struct GreetingRequest: Codable {
     let name: String
@@ -185,6 +188,26 @@ let response: GreetingResponse = try await client.functions.invoke(
     body: GreetingRequest(name: "Alice")
 )
 print(response.message) // "Hello, Alice!"
+
+// Invoke a function with a custom method and headers
+let getResponse: GreetingResponse = try await client.functions.invoke(
+    "hello-world",
+    options: FunctionInvokeOptions(
+        method: .get,
+        headers: ["X-Trace-ID": UUID().uuidString]
+    )
+)
+
+// Configure a direct functions URL and fall back to the proxy on 404
+let directFunctionsClient = InsForgeClient(
+    baseURL: URL(string: "https://your-project.insforge.app")!,
+    anonKey: "your-anon-key",
+    options: InsForgeClientOptions(
+        functions: .init(
+            url: URL(string: "https://your-project.functions.insforge.app")!
+        )
+    )
+)
 ```
 
 ### AI
@@ -252,6 +275,9 @@ await client.realtime.disconnect()
 ## Advanced Configuration
 
 ```swift
+import InsForge
+import InsForgeFunctions
+
 let client = InsForgeClient(
     baseURL: URL(string: "https://your-project.insforge.com")!,
     anonKey: "your-anon-key",
