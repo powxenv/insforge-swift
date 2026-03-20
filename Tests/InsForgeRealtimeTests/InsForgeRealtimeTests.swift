@@ -385,8 +385,9 @@ final class InsForgeRealtimeTests: XCTestCase {
                         let newTitle = "Updated at \(Date().timeIntervalSince1970)"
                         let updateResult: [TodoUpdate] = try await database
                             .from("todos")
-                            .eq("id", value: todoId)
                             .update(TodoUpdate(title: newTitle))
+                            .eq("id", value: todoId)
+                            .execute()
 
                         print("[Test] ✅ Todo updated: \(updateResult)")
 

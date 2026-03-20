@@ -113,15 +113,15 @@ final class InsForgeDatabaseTests: XCTestCase {
         let builder = await client.database.from("posts")
 
         // First page
-        let page1 = builder.limit(10).offset(0)
+        let page1 = builder.select().limit(10).offset(0)
         XCTAssertNotNil(page1)
 
         // Second page
-        let page2 = builder.limit(10).offset(10)
+        let page2 = builder.select().limit(10).offset(10)
         XCTAssertNotNil(page2)
 
         // Third page
-        let page3 = builder.limit(10).offset(20)
+        let page3 = builder.select().limit(10).offset(20)
         XCTAssertNotNil(page3)
     }
 
@@ -153,7 +153,7 @@ final class InsForgeDatabaseTests: XCTestCase {
         XCTAssertNotNil(filtered)
     }
 
-    func testUpsertRejectsUnsupportedQueryModifiers() async {
+    func testUpsertStartsFromTableBuilder() async {
         let client = TestHelper.createClient()
         let builder = await client.database.from("posts")
         let post = Post(
@@ -165,27 +165,14 @@ final class InsForgeDatabaseTests: XCTestCase {
             createdAt: nil
         )
 
-        do {
-            let _: [Post] = try await builder
-                .eq("id", value: "post-123")
-                .order("created_at")
-                .upsert([post], onConflict: "id")
-            XCTFail("Expected upsert() to reject unsupported query modifiers")
-        } catch let error as InsForgeError {
-            guard case .validationError(let message) = error else {
-                XCTFail("Expected validationError, got \(error)")
-                return
-            }
-
-            XCTAssertTrue(message.contains("upsert()"))
-            XCTAssertTrue(message.contains("id"))
-            XCTAssertTrue(message.contains("order"))
-        } catch {
-            XCTFail("Expected InsForgeError.validationError, got \(error)")
+        let upsertCall = { () async throws -> [Post] in
+            try await builder.upsert([post], onConflict: "id")
         }
+
+        XCTAssertNotNil(upsertCall)
     }
 
-    func testInsertRejectsUnsupportedQueryModifiers() async {
+    func testMutationBuilderSeparatesUpdateFlowFromReadFlow() async {
         let client = TestHelper.createClient()
         let builder = await client.database.from("posts")
         let post = Post(
@@ -197,24 +184,16 @@ final class InsForgeDatabaseTests: XCTestCase {
             createdAt: nil
         )
 
-        do {
-            let _: [Post] = try await builder
-                .eq("id", value: "post-123")
-                .order("created_at")
-                .insert([post])
-            XCTFail("Expected insert() to reject unsupported query modifiers")
-        } catch let error as InsForgeError {
-            guard case .validationError(let message) = error else {
-                XCTFail("Expected validationError, got \(error)")
-                return
-            }
+        let updateBuilder = builder
+            .update(post)
+            .eq("id", value: "post-123")
 
-            XCTAssertTrue(message.contains("insert()"))
-            XCTAssertTrue(message.contains("id"))
-            XCTAssertTrue(message.contains("order"))
-        } catch {
-            XCTFail("Expected InsForgeError.validationError, got \(error)")
-        }
+        let deleteBuilder = builder
+            .delete()
+            .eq("id", value: "post-123")
+
+        XCTAssertNotNil(updateBuilder)
+        XCTAssertNotNil(deleteBuilder)
     }
 
     // MARK: - Model Encoding Tests

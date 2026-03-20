@@ -103,14 +103,16 @@ let inserted = try await client.database
 let updates = ["title": "Updated Title"]
 let updated: [Post] = try await client.database
     .from("posts")
-    .eq("id", value: "some-id")
     .update(updates)
+    .eq("id", value: "some-id")
+    .execute()
 
 // Delete records
 try await client.database
     .from("posts")
-    .eq("id", value: "some-id")
     .delete()
+    .eq("id", value: "some-id")
+    .execute()
 ```
 
 ### Storage
