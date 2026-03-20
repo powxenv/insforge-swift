@@ -685,7 +685,9 @@ final class ChatCompletionStreamTests: XCTestCase {
     func testToolCallStreamingFlow() {
         let sseLines = [
             // Chunk 1: role + tool call start (id, name, empty args)
-            "data: {\"id\":\"1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_abc\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}",
+            "data: {\"id\":\"1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"role\":\"assistant\"," +
+            "\"tool_calls\":[{\"index\":0,\"id\":\"call_abc\",\"type\":\"function\"," +
+            "\"function\":{\"name\":\"get_weather\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}",
             "",
             // Chunk 2: partial arguments
             "data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"city\\\":\"}}]},\"finish_reason\":null}]}",
@@ -745,7 +747,10 @@ final class ChatCompletionStreamTests: XCTestCase {
     func testParallelToolCallDeltas() {
         let sseLines = [
             // Two tool calls started in the same chunk
-            "data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"\"}},{\"index\":1,\"id\":\"call_2\",\"type\":\"function\",\"function\":{\"name\":\"get_time\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}",
+            "data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"tool_calls\":[" +
+            "{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"\"}}," +
+            "{\"index\":1,\"id\":\"call_2\",\"type\":\"function\",\"function\":{\"name\":\"get_time\",\"arguments\":\"\"}}]}" +
+            ",\"finish_reason\":null}]}",
             ""
         ]
 
