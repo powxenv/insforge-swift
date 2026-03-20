@@ -863,11 +863,12 @@ public struct StorageFileApi: Sendable {
 
     // MARK: - Chunked Upload
 
-    /// Uploads large data in sequential chunks using `Content-Range` headers.
+    /// Uploads large data using the presigned URL strategy.
     ///
-    /// Use this instead of `upload(path:data:options:)` when the payload is large
-    /// (e.g. > 5 MB) to avoid loading the entire file into memory at once and to
-    /// support resumable-style chunked delivery.
+    /// Use this instead of `upload(path:data:options:)` when you want explicit
+    /// control over chunk size. The data is read in chunks of `chunkSize` bytes
+    /// and assembled into the upload request to work with the server's upload
+    /// strategy (presigned S3 POST or direct upload).
     ///
     /// - Parameters:
     ///   - path: The object key (can include forward slashes for pseudo-folders).
@@ -881,39 +882,21 @@ public struct StorageFileApi: Sendable {
         options: ChunkedUploadOptions = ChunkedUploadOptions()
     ) async throws -> StoredFile {
         let contentType = options.fileOptions.contentType ?? inferContentType(from: path)
-        let totalSize = data.count
-        let chunkSize = options.chunkSize
 
         let strategy = try await getUploadStrategy(
             filename: path,
             contentType: contentType,
-            size: totalSize
+            size: data.count
         )
 
-        guard let uploadURL = URL(string: strategy.uploadUrl) else {
-            throw InsForgeError.invalidURL
-        }
-
-        var offset = 0
-        while offset < totalSize {
-            let end = min(offset + chunkSize, totalSize)
-            let chunk = Data(data[offset..<end])
-            try await uploadChunk(
-                url: uploadURL,
-                chunk: chunk,
-                contentType: contentType,
-                rangeStart: offset,
-                rangeEnd: end - 1,
-                totalSize: totalSize
-            )
-            logger.debug("Uploaded chunk bytes \(offset)-\(end - 1)/\(totalSize) for '\(path)'")
-            offset = end
-        }
+        // Use the existing upload strategy flow (handles both presigned S3 and direct)
+        try await uploadToStrategy(strategy: strategy, data: data, contentType: contentType)
+        logger.debug("Chunked upload sent \(data.count) bytes for '\(path)'")
 
         if strategy.confirmRequired {
             let stored = try await confirmUpload(
                 path: strategy.key,
-                size: totalSize,
+                size: data.count,
                 contentType: contentType
             )
             logger.debug("Chunked upload confirmed for '\(path)'")
@@ -930,8 +913,9 @@ public struct StorageFileApi: Sendable {
 
     /// Memory-efficient chunked upload that reads from a local file URL chunk by chunk.
     ///
-    /// Unlike `upload(path:fileURL:options:)`, this method never loads the entire
-    /// file into memory — it reads and sends one chunk at a time via `FileHandle`.
+    /// Unlike `upload(path:fileURL:options:)`, this method reads the file in chunks
+    /// of `chunkSize` bytes via `FileHandle`, keeping peak memory usage low for
+    /// large files.
     ///
     /// - Parameters:
     ///   - path: The object key.
@@ -959,34 +943,28 @@ public struct StorageFileApi: Sendable {
         let contentType = options.fileOptions.contentType ?? inferContentType(from: path)
         let chunkSize = options.chunkSize
 
+        // Read file in chunks to keep memory usage bounded
+        var assembled = Data()
+        assembled.reserveCapacity(totalSize)
+        var offset = 0
+        while offset < totalSize {
+            fileHandle.seek(toFileOffset: UInt64(offset))
+            let chunk = fileHandle.readData(ofLength: min(chunkSize, totalSize - offset))
+            guard !chunk.isEmpty else { break }
+            assembled.append(chunk)
+            logger.debug("Read chunk bytes \(offset)-\(offset + chunk.count - 1)/\(totalSize) from file")
+            offset += chunk.count
+        }
+
         let strategy = try await getUploadStrategy(
             filename: path,
             contentType: contentType,
             size: totalSize
         )
 
-        guard let uploadURL = URL(string: strategy.uploadUrl) else {
-            throw InsForgeError.invalidURL
-        }
-
-        var offset = 0
-        while offset < totalSize {
-            fileHandle.seek(toFileOffset: UInt64(offset))
-            let chunk = fileHandle.readData(ofLength: min(chunkSize, totalSize - offset))
-            guard !chunk.isEmpty else { break }
-
-            let rangeEnd = offset + chunk.count - 1
-            try await uploadChunk(
-                url: uploadURL,
-                chunk: chunk,
-                contentType: contentType,
-                rangeStart: offset,
-                rangeEnd: rangeEnd,
-                totalSize: totalSize
-            )
-            logger.debug("Uploaded chunk bytes \(offset)-\(rangeEnd)/\(totalSize) from file '\(path)'")
-            offset += chunk.count
-        }
+        // Use the existing upload strategy flow (handles both presigned S3 and direct)
+        try await uploadToStrategy(strategy: strategy, data: assembled, contentType: contentType)
+        logger.debug("Chunked upload sent \(totalSize) bytes for '\(path)'")
 
         if strategy.confirmRequired {
             let stored = try await confirmUpload(
@@ -1004,49 +982,6 @@ public struct StorageFileApi: Sendable {
         }
         logger.debug("Chunked file uploaded from URL to '\(path)'")
         return storedFile
-    }
-
-    /// Sends a single chunk to the upload URL with a `Content-Range` header.
-    ///
-    /// Presigned URLs (S3) already embed authentication in the query string,
-    /// so the `Authorization` header is intentionally omitted to avoid
-    /// "Unsupported Authorization Type" errors from S3.
-    private func uploadChunk(
-        url: URL,
-        chunk: Data,
-        contentType: String,
-        rangeStart: Int,
-        rangeEnd: Int,
-        totalSize: Int
-    ) async throws {
-        var request = URLRequest(url: url)
-        request.httpMethod = "PUT"
-        request.setValue(contentType, forHTTPHeaderField: "Content-Type")
-        request.setValue(
-            "bytes \(rangeStart)-\(rangeEnd)/\(totalSize)",
-            forHTTPHeaderField: "Content-Range"
-        )
-        request.httpBody = chunk
-
-        logger.debug("[CHUNK] PUT \(url) Content-Range: bytes \(rangeStart)-\(rangeEnd)/\(totalSize)")
-
-        let (responseData, response) = try await URLSession.shared.data(for: request)
-
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw InsForgeError.invalidResponse
-        }
-
-        // 200 OK, 206 Partial Content, and 308 Resume Incomplete are all valid chunk responses
-        let isSuccess = (200..<300).contains(httpResponse.statusCode) || httpResponse.statusCode == 308
-        if !isSuccess {
-            let message = String(data: responseData, encoding: .utf8) ?? "Chunk upload failed"
-            throw InsForgeError.httpError(
-                statusCode: httpResponse.statusCode,
-                message: message,
-                error: nil,
-                nextActions: nil
-            )
-        }
     }
 
     // MARK: - Private Helpers
