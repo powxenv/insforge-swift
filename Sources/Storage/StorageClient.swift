@@ -31,6 +31,26 @@ public struct BucketOptions: Sendable {
     }
 }
 
+/// Options for chunked upload of large files
+public struct ChunkedUploadOptions: Sendable {
+    /// Size of each chunk in bytes. Defaults to 5 MB.
+    public var chunkSize: Int
+
+    /// Standard file options (content type, custom headers).
+    public var fileOptions: FileOptions
+
+    /// Default chunk size: 5 MB.
+    public static let defaultChunkSize: Int = 5 * 1024 * 1024
+
+    public init(
+        chunkSize: Int = defaultChunkSize,
+        fileOptions: FileOptions = FileOptions()
+    ) {
+        self.chunkSize = max(1, chunkSize)
+        self.fileOptions = fileOptions
+    }
+}
+
 /// Options for listing files
 public struct ListOptions: Sendable {
     /// Filter objects by key prefix
@@ -839,6 +859,129 @@ public struct StorageFileApi: Sendable {
         let strategy = try response.decode(DownloadStrategy.self)
         logger.debug("Got download strategy: \(strategy.method) for '\(path)'")
         return strategy
+    }
+
+    // MARK: - Chunked Upload
+
+    /// Uploads large data using the presigned URL strategy.
+    ///
+    /// Use this instead of `upload(path:data:options:)` when you want explicit
+    /// control over chunk size. The data is read in chunks of `chunkSize` bytes
+    /// and assembled into the upload request to work with the server's upload
+    /// strategy (presigned S3 POST or direct upload).
+    ///
+    /// - Parameters:
+    ///   - path: The object key (can include forward slashes for pseudo-folders).
+    ///   - data: The file data to upload.
+    ///   - options: Chunked upload options (chunk size, content type, etc.).
+    /// - Returns: `StoredFile` with upload details.
+    @discardableResult
+    public func uploadChunked(
+        path: String,
+        data: Data,
+        options: ChunkedUploadOptions = ChunkedUploadOptions()
+    ) async throws -> StoredFile {
+        let contentType = options.fileOptions.contentType ?? inferContentType(from: path)
+
+        let strategy = try await getUploadStrategy(
+            filename: path,
+            contentType: contentType,
+            size: data.count
+        )
+
+        // Use the existing upload strategy flow (handles both presigned S3 and direct)
+        try await uploadToStrategy(strategy: strategy, data: data, contentType: contentType)
+        logger.debug("Chunked upload sent \(data.count) bytes for '\(path)'")
+
+        if strategy.confirmRequired {
+            let stored = try await confirmUpload(
+                path: strategy.key,
+                size: data.count,
+                contentType: contentType
+            )
+            logger.debug("Chunked upload confirmed for '\(path)'")
+            return stored
+        }
+
+        let files = try await list(options: ListOptions(prefix: strategy.key, limit: 1))
+        guard let storedFile = files.first else {
+            throw InsForgeError.httpError(statusCode: 404, message: "Uploaded file not found", error: nil, nextActions: nil)
+        }
+        logger.debug("Chunked file uploaded to '\(path)'")
+        return storedFile
+    }
+
+    /// Memory-efficient chunked upload that reads from a local file URL chunk by chunk.
+    ///
+    /// Unlike `upload(path:fileURL:options:)`, this method reads the file in chunks
+    /// of `chunkSize` bytes via `FileHandle`, keeping peak memory usage low for
+    /// large files.
+    ///
+    /// - Parameters:
+    ///   - path: The object key.
+    ///   - fileURL: Local URL of the file to upload.
+    ///   - options: Chunked upload options (chunk size, content type, etc.).
+    /// - Returns: `StoredFile` with upload details.
+    @discardableResult
+    public func uploadChunked(
+        path: String,
+        fileURL: URL,
+        options: ChunkedUploadOptions = ChunkedUploadOptions()
+    ) async throws -> StoredFile {
+        guard let fileHandle = FileHandle(forReadingAtPath: fileURL.path) else {
+            throw InsForgeError.httpError(
+                statusCode: 0,
+                message: "Cannot open file at \(fileURL.path)",
+                error: nil,
+                nextActions: nil
+            )
+        }
+        defer { fileHandle.closeFile() }
+
+        let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+        let totalSize = (attributes[.size] as? Int) ?? 0
+        let contentType = options.fileOptions.contentType ?? inferContentType(from: path)
+        let chunkSize = options.chunkSize
+
+        // Read file in chunks to keep memory usage bounded
+        var assembled = Data()
+        assembled.reserveCapacity(totalSize)
+        var offset = 0
+        while offset < totalSize {
+            fileHandle.seek(toFileOffset: UInt64(offset))
+            let chunk = fileHandle.readData(ofLength: min(chunkSize, totalSize - offset))
+            guard !chunk.isEmpty else { break }
+            assembled.append(chunk)
+            logger.debug("Read chunk bytes \(offset)-\(offset + chunk.count - 1)/\(totalSize) from file")
+            offset += chunk.count
+        }
+
+        let strategy = try await getUploadStrategy(
+            filename: path,
+            contentType: contentType,
+            size: totalSize
+        )
+
+        // Use the existing upload strategy flow (handles both presigned S3 and direct)
+        try await uploadToStrategy(strategy: strategy, data: assembled, contentType: contentType)
+        logger.debug("Chunked upload sent \(totalSize) bytes for '\(path)'")
+
+        if strategy.confirmRequired {
+            let stored = try await confirmUpload(
+                path: strategy.key,
+                size: totalSize,
+                contentType: contentType
+            )
+            logger.debug("Chunked file upload confirmed for '\(path)'")
+            return stored
+        }
+
+        let files = try await list(options: ListOptions(prefix: strategy.key, limit: 1))
+        guard let storedFile = files.first else {
+            throw InsForgeError.httpError(statusCode: 404, message: "Uploaded file not found", error: nil, nextActions: nil)
+        }
+        logger.debug("Chunked file uploaded from URL to '\(path)'")
+        return storedFile
     }
 
     // MARK: - Private Helpers

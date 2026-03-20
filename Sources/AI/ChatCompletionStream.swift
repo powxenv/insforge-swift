@@ -260,105 +260,99 @@ extension AIClient {
         // ── Create the async stream ──────────────────────────────────────────
         return AsyncThrowingStream { continuation in
             let task = Task {
-                do {
-                    // Allow one automatic token refresh on 401.
-                    var currentHeaders = requestHeaders
-                    for attempt in 0..<2 {
-                        var request = URLRequest(url: endpoint)
-                        request.httpMethod = "POST"
-                        request.httpBody = bodyData
-                        for (key, value) in currentHeaders {
-                            request.setValue(value, forHTTPHeaderField: key)
-                        }
+                await self.performStreamTask(
+                    endpoint: endpoint,
+                    bodyData: bodyData,
+                    requestHeaders: requestHeaders,
+                    refreshHandler: refreshHandler,
+                    continuation: continuation
+                )
+            }
+            continuation.onTermination = { @Sendable _ in task.cancel() }
+        }
+    }
 
-                        let (bytes, urlResponse) = try await URLSession.shared.bytes(for: request)
+    /// Executes the SSE request loop, including one 401 token-refresh retry.
+    ///
+    /// Extracted from `chatCompletionStream` to satisfy SwiftLint's
+    /// `function_body_length` limit on the public API surface.
+    @available(iOS 15.0, macOS 12.0, tvOS 15.0, watchOS 8.0, visionOS 1.0, *)
+    private func performStreamTask(
+        endpoint: URL,
+        bodyData: Data,
+        requestHeaders: [String: String],
+        refreshHandler: (any TokenRefreshHandler)?,
+        continuation: AsyncThrowingStream<ChatCompletionChunk, Error>.Continuation
+    ) async {
+        do {
+            var currentHeaders = requestHeaders
+            for attempt in 0..<2 {
+                var request = URLRequest(url: endpoint)
+                request.httpMethod = "POST"
+                request.httpBody = bodyData
+                for (key, value) in currentHeaders { request.setValue(value, forHTTPHeaderField: key) }
 
-                        guard let httpResponse = urlResponse as? HTTPURLResponse else {
-                            continuation.finish(throwing: InsForgeError.invalidResponse)
-                            return
-                        }
-
-                        // ── 401: refresh token and retry once ────────────────
-                        if httpResponse.statusCode == 401,
-                           attempt == 0,
-                           let handler = refreshHandler {
-                            let newToken = try await handler.refreshToken()
-                            currentHeaders["Authorization"] = "Bearer \(newToken)"
-                            continue
-                        }
-
-                        // ── Non-2xx: buffer the error body and throw ──────────
-                        guard (200..<300).contains(httpResponse.statusCode) else {
-                            var errorData = Data()
-                            for try await byte in bytes {
-                                errorData.append(byte)
-                            }
-                            let errorBody = try? JSONDecoder().decode(ErrorResponse.self, from: errorData)
-                            continuation.finish(throwing: InsForgeError.httpError(
-                                statusCode: httpResponse.statusCode,
-                                message: errorBody?.message ?? "Stream request failed",
-                                error: errorBody?.error,
-                                nextActions: errorBody?.nextActions
-                            ))
-                            return
-                        }
-
-                        // ── Parse SSE events ─────────────────────────────────
-                        // SSE spec: an event can span multiple "data:" lines,
-                        // terminated by a blank line. Lines are buffered until
-                        // a blank line (or EOF) triggers a flush.
-                        var dataBuffer: [String] = []
-                        var receivedTerminal = false
-
-                        for try await line in bytes.lines {
-                            if line.hasPrefix("data: ") {
-                                dataBuffer.append(String(line.dropFirst(6)))
-                                continue
-                            }
-
-                            // Blank line = end of SSE event; flush the buffer.
-                            guard line.isEmpty, !dataBuffer.isEmpty else { continue }
-
-                            if flushBuffer(dataBuffer, into: continuation) {
-                                receivedTerminal = true
-                            }
-                            dataBuffer.removeAll()
-
-                            if receivedTerminal { break }
-                        }
-
-                        // ── EOF flush ─────────────────────────────────────────
-                        // Some servers close the connection after the final
-                        // data: line without sending a trailing blank line.
-                        // Dispatch any remaining buffered data before deciding
-                        // whether the stream was truncated.
-                        if !receivedTerminal, !dataBuffer.isEmpty {
-                            receivedTerminal = flushBuffer(dataBuffer, into: continuation)
-                        }
-
-                        // If no terminal signal was received the stream was
-                        // truncated (server/proxy/network drop mid-response).
-                        if receivedTerminal {
-                            continuation.finish()
-                        } else {
-                            continuation.finish(throwing: InsForgeError.networkError(
-                                .other("Stream ended without a terminal signal; response may be truncated")
-                            ))
-                        }
-                        return
-                    }
-
-                    // Exhausted retries (both attempts returned 401).
-                    continuation.finish(throwing: InsForgeError.authenticationRequired)
-                } catch {
-                    continuation.finish(throwing: error)
+                let (bytes, urlResponse) = try await URLSession.shared.bytes(for: request)
+                guard let httpResponse = urlResponse as? HTTPURLResponse else {
+                    continuation.finish(throwing: InsForgeError.invalidResponse); return
                 }
-            }
 
-            continuation.onTermination = { @Sendable _ in
-                task.cancel()
+                // ── 401: refresh token and retry once ────────────────────────
+                if httpResponse.statusCode == 401, attempt == 0, let handler = refreshHandler {
+                    let newToken = try await handler.refreshToken()
+                    currentHeaders["Authorization"] = "Bearer \(newToken)"
+                    continue
+                }
+
+                // ── Non-2xx: buffer the error body and throw ──────────────────
+                guard (200..<300).contains(httpResponse.statusCode) else {
+                    var errorData = Data()
+                    for try await byte in bytes { errorData.append(byte) }
+                    let errorBody = try? JSONDecoder().decode(ErrorResponse.self, from: errorData)
+                    continuation.finish(throwing: InsForgeError.httpError(
+                        statusCode: httpResponse.statusCode,
+                        message: errorBody?.message ?? "Stream request failed",
+                        error: errorBody?.error,
+                        nextActions: errorBody?.nextActions
+                    ))
+                    return
+                }
+
+                // ── Parse SSE events ──────────────────────────────────────────
+                // SSE spec: an event spans one or more "data:" lines, terminated
+                // by a blank line. Buffer lines until a blank line (or EOF) flushes.
+                var dataBuffer: [String] = []
+                var receivedTerminal = false
+                for try await line in bytes.lines {
+                    if line.hasPrefix("data: ") {
+                        dataBuffer.append(String(line.dropFirst(6))); continue
+                    }
+                    guard line.isEmpty, !dataBuffer.isEmpty else { continue }
+                    if flushBuffer(dataBuffer, into: continuation) { receivedTerminal = true }
+                    dataBuffer.removeAll()
+                    if receivedTerminal { break }
+                }
+
+                // ── EOF flush ─────────────────────────────────────────────────
+                // Some servers omit the trailing blank line after the last event.
+                if !receivedTerminal, !dataBuffer.isEmpty {
+                    receivedTerminal = flushBuffer(dataBuffer, into: continuation)
+                }
+
+                if receivedTerminal {
+                    continuation.finish()
+                } else {
+                    continuation.finish(throwing: InsForgeError.networkError(
+                        .other("Stream ended without a terminal signal; response may be truncated")
+                    ))
+                }
+                return
             }
+            continuation.finish(throwing: InsForgeError.authenticationRequired)
+        } catch {
+            continuation.finish(throwing: error)
         }
     }
 }
+
 #endif
