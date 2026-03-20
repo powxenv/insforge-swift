@@ -118,13 +118,14 @@ public actor AuthClient {
         url: URL,
         authComponent: URL,
         headers: [String: String],
+        session: URLSession = .shared,
         options: AuthOptions = AuthOptions()
     ) {
         self.init(
             url: url,
             authComponent: authComponent,
             headers: headers,
-            httpClient: HTTPClient(),
+            httpClient: HTTPClient(session: session),
             options: options
         )
     }

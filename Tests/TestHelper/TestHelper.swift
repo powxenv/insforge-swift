@@ -16,21 +16,21 @@ public enum TestHelper {
     // MARK: - Configuration
 
     /// InsForge instance URL for testing
-    public static let insForgeURL = "https://pg6afqz9.us-east.insforge.app"
+    public static let insForgeURL = "https://u8rrnkah.ap-southeast.insforge.app"
 
     /// Anonymous API key for public operations
     /// JWT token split into parts to comply with line length limits
     public static let anonKey = [
         "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
-        "eyJzdWIiOiIxMjM0NTY3OC0xMjM0LTU2NzgtOTBhYi1jZGVmMTIzNDU2NzgiLCJlbWFpbCI6ImFub25AaW5zZm9yZ2UuY29tIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njc5MDc5MzJ9",
-        "K0semVtcacV55qeEhVUI3WKWzT7p87JU7wNzdXysRWo"
+        "eyJzdWIiOiIxMjM0NTY3OC0xMjM0LTU2NzgtOTBhYi1jZGVmMTIzNDU2NzgiLCJlbWFpbCI6ImFub25AaW5zZm9yZ2UuY29tIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM5ODg5Nzd9",
+        "rw1-3kJ_BbzPr59ZSkuUPw-6RPbgAwAY0MXVY82F5gw",
     ].joined(separator: ".")
 
     /// Authenticated user token for testing (optional, may expire)
     public static let userToken = [
         "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
         "eyJzdWIiOiIwODVhNDgxZS05NGI4LTRiZjktYjNhMC03ZjBlNTBmN2EwNzIiLCJlbWFpbCI6Imp1bndlbi5mZW5nQGluc2ZvcmdlLmRldiIsInJvbGUiOiJhdXRoZW50aWNhdGVkIiwiaWF0IjoxNzY3NzQyMTE2LCJleHAiOjE3NjgzNDY5MTZ9",
-        "jhfprod2CU1Bn2j92wG9_j0MdmbtycpRI0SHoqqDtcc"
+        "jhfprod2CU1Bn2j92wG9_j0MdmbtycpRI0SHoqqDtcc",
     ].joined(separator: ".")
 
     // MARK: - Client Creation

@@ -106,6 +106,7 @@ public actor StorageClient {
     private let url: URL
     private let headersProvider: LockIsolated<[String: String]>
     private let httpClient: HTTPClient
+    private let session: URLSession
     private let tokenRefreshHandler: (any TokenRefreshHandler)?
     private var logger: Logging.Logger { InsForgeLoggerFactory.shared }
 
@@ -117,11 +118,13 @@ public actor StorageClient {
     public init(
         url: URL,
         headersProvider: LockIsolated<[String: String]>,
+        session: URLSession = .shared,
         tokenRefreshHandler: (any TokenRefreshHandler)? = nil
     ) {
         self.url = url
         self.headersProvider = headersProvider
-        self.httpClient = HTTPClient()
+        self.httpClient = HTTPClient(session: session)
+        self.session = session
         self.tokenRefreshHandler = tokenRefreshHandler
     }
 
@@ -159,6 +162,7 @@ public actor StorageClient {
             url: url,
             headersProvider: headersProvider,
             httpClient: httpClient,
+            session: session,
             tokenRefreshHandler: tokenRefreshHandler
         )
     }
@@ -338,6 +342,7 @@ public struct StorageFileApi: Sendable {
     private let url: URL
     private let headersProvider: LockIsolated<[String: String]>
     private let httpClient: HTTPClient
+    private let session: URLSession
     private let tokenRefreshHandler: (any TokenRefreshHandler)?
     private var logger: Logging.Logger { InsForgeLoggerFactory.shared }
 
@@ -351,12 +356,14 @@ public struct StorageFileApi: Sendable {
         url: URL,
         headersProvider: LockIsolated<[String: String]>,
         httpClient: HTTPClient,
+        session: URLSession,
         tokenRefreshHandler: (any TokenRefreshHandler)? = nil
     ) {
         self.bucketId = bucketId
         self.url = url
         self.headersProvider = headersProvider
         self.httpClient = httpClient
+        self.session = session
         self.tokenRefreshHandler = tokenRefreshHandler
     }
 
@@ -540,7 +547,6 @@ public struct StorageFileApi: Sendable {
 
         logger.debug("[UPLOAD-PRESIGNED] \(url)")
 
-        let session = URLSession.shared
         let (responseData, response) = try await session.data(for: request)
 
         guard let httpResponse = response as? HTTPURLResponse else {
@@ -577,7 +583,6 @@ public struct StorageFileApi: Sendable {
 
         logger.debug("[DOWNLOAD] \(downloadURL)")
 
-        let session = URLSession.shared
         let (data, response) = try await session.data(from: downloadURL)
 
         guard let httpResponse = response as? HTTPURLResponse else {

@@ -96,12 +96,13 @@ public actor DatabaseClient {
     public init(
         url: URL,
         headersProvider: LockIsolated<[String: String]>,
+        session: URLSession = .shared,
         options: DatabaseOptions = DatabaseOptions(),
         tokenRefreshHandler: (any TokenRefreshHandler)? = nil
     ) {
         self.url = url
         self.headersProvider = headersProvider
-        self.httpClient = HTTPClient()
+        self.httpClient = HTTPClient(session: session)
         self.encoder = options.encoder
         self.decoder = options.decoder
         self.tokenRefreshHandler = tokenRefreshHandler

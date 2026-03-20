@@ -110,6 +110,7 @@ public final class InsForgeClient: Sendable {
             url: baseURL.appendingPathComponent("api/auth"),
             authComponent: baseURL.appendingPathComponent("auth"),
             headers: headers,
+            session: options.global.session,
             options: options.auth
         )
 
@@ -161,6 +162,7 @@ public final class InsForgeClient: Sendable {
                 state.database = DatabaseClient(
                     url: baseURL.appendingPathComponent("api/database"),
                     headersProvider: _headers,
+                    session: options.global.session,
                     options: options.database,
                     tokenRefreshHandler: _tokenRefreshHandler
                 )
@@ -177,6 +179,7 @@ public final class InsForgeClient: Sendable {
                 state.storage = StorageClient(
                     url: baseURL.appendingPathComponent("api/storage"),
                     headersProvider: _headers,
+                    session: options.global.session,
                     tokenRefreshHandler: _tokenRefreshHandler
                 )
             }
@@ -192,6 +195,7 @@ public final class InsForgeClient: Sendable {
                 state.functions = FunctionsClient(
                     url: baseURL.appendingPathComponent("functions"),
                     headersProvider: _headers,
+                    session: options.global.session,
                     tokenRefreshHandler: _tokenRefreshHandler
                 )
             }
@@ -207,6 +211,7 @@ public final class InsForgeClient: Sendable {
                 state.ai = AIClient(
                     url: baseURL.appendingPathComponent("api/ai"),
                     headersProvider: _headers,
+                    session: options.global.session,
                     tokenRefreshHandler: _tokenRefreshHandler
                 )
             }

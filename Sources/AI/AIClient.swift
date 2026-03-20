@@ -18,11 +18,12 @@ public actor AIClient {
     public init(
         url: URL,
         headersProvider: LockIsolated<[String: String]>,
+        session: URLSession = .shared,
         tokenRefreshHandler: (any TokenRefreshHandler)? = nil
     ) {
         self.url = url
         self.headersProvider = headersProvider
-        self.httpClient = HTTPClient()
+        self.httpClient = HTTPClient(session: session)
         self.tokenRefreshHandler = tokenRefreshHandler
     }
 
