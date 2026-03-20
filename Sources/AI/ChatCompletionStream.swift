@@ -1,7 +1,29 @@
 import Foundation
 import InsForgeCore
 
-// MARK: - Public Streaming Response Type
+// MARK: - Public Streaming Response Types
+
+/// An incremental tool-call delta streamed by the model.
+///
+/// Arguments arrive across multiple chunks; callers should concatenate
+/// `function.arguments` across all chunks that share the same `index`.
+public struct ToolCallDelta: Sendable {
+    /// Position of this tool call in the list (used to correlate partial chunks).
+    public let index: Int
+    /// Tool-call ID, present only on the first chunk for each index.
+    public let id: String?
+    /// Always `"function"` when present.
+    public let type: String?
+    /// Partial function name and/or arguments for this chunk.
+    public let function: FunctionDelta?
+
+    public struct FunctionDelta: Sendable {
+        /// Function name — present only on the first chunk for each index.
+        public let name: String?
+        /// Partial JSON arguments string; concatenate across chunks to build the full value.
+        public let arguments: String?
+    }
+}
 
 /// A single chunk delivered by a streaming chat completion via Server-Sent Events.
 ///
@@ -9,7 +31,7 @@ import InsForgeCore
 /// The stream ends either when `isFinished` is `true` or the `AsyncThrowingStream` finishes.
 public struct ChatCompletionChunk: Sendable {
     /// The incremental text content for this chunk.
-    /// Empty on role-only deltas and on the terminal `[DONE]` chunk.
+    /// Empty on role-only deltas, tool-call deltas, and the terminal `[DONE]` chunk.
     public let text: String
 
     /// `true` when the server has signalled the end of the stream
@@ -20,10 +42,22 @@ public struct ChatCompletionChunk: Sendable {
     /// Usually present on the first chunk only; `nil` on subsequent chunks.
     public let model: String?
 
-    public init(text: String, isFinished: Bool, model: String? = nil) {
+    /// Partial tool-call deltas for this chunk.
+    /// Non-nil (and non-empty) when the model is streaming a function call
+    /// instead of plain text. Concatenate `function.arguments` across chunks
+    /// that share the same `index` to reconstruct each full tool call.
+    public let toolCallDeltas: [ToolCallDelta]?
+
+    public init(
+        text: String,
+        isFinished: Bool,
+        model: String? = nil,
+        toolCallDeltas: [ToolCallDelta]? = nil
+    ) {
         self.text = text
         self.isFinished = isFinished
         self.model = model
+        self.toolCallDeltas = toolCallDeltas
     }
 }
 
@@ -48,6 +82,78 @@ private struct SSEChoice: Decodable {
 private struct SSEDelta: Decodable {
     let role: String?
     let content: String?
+    let toolCalls: [SSEToolCallDelta]?
+
+    enum CodingKeys: String, CodingKey {
+        case role
+        case content
+        case toolCalls = "tool_calls"
+    }
+}
+
+private struct SSEToolCallDelta: Decodable {
+    let index: Int
+    let id: String?
+    let type: String?
+    let function: SSEToolCallFunction?
+}
+
+private struct SSEToolCallFunction: Decodable {
+    let name: String?
+    let arguments: String?
+}
+
+// MARK: - Private SSE Event Processing
+
+/// Converts a decoded ``SSEChunk`` into a ``ChatCompletionChunk``.
+private func makeChunk(from sseChunk: SSEChunk) -> ChatCompletionChunk {
+    let choice = sseChunk.choices.first
+    let deltaText = choice?.delta.content ?? ""
+    let isFinished = choice?.finishReason != nil
+
+    let toolCallDeltas: [ToolCallDelta]? = choice?.delta.toolCalls.map { deltas in
+        deltas.map { d in
+            ToolCallDelta(
+                index: d.index,
+                id: d.id,
+                type: d.type,
+                function: d.function.map {
+                    ToolCallDelta.FunctionDelta(name: $0.name, arguments: $0.arguments)
+                }
+            )
+        }
+    }
+
+    return ChatCompletionChunk(
+        text: deltaText,
+        isFinished: isFinished,
+        model: sseChunk.model,
+        toolCallDeltas: toolCallDeltas
+    )
+}
+
+/// Flushes `dataBuffer` as a single SSE event and yields the result into `continuation`.
+/// Returns `true` if a terminal signal was encountered.
+private func flushBuffer(
+    _ dataBuffer: [String],
+    into continuation: AsyncThrowingStream<ChatCompletionChunk, Error>.Continuation
+) -> Bool {
+    guard !dataBuffer.isEmpty else { return false }
+
+    let payload = dataBuffer.joined(separator: "\n")
+
+    if payload == "[DONE]" {
+        continuation.yield(ChatCompletionChunk(text: "", isFinished: true))
+        return true
+    }
+
+    guard let chunkData = payload.data(using: .utf8),
+          let sseChunk = try? JSONDecoder().decode(SSEChunk.self, from: chunkData)
+    else { return false }
+
+    let chunk = makeChunk(from: sseChunk)
+    continuation.yield(chunk)
+    return chunk.isFinished
 }
 
 // MARK: - AIClient Streaming Extension
@@ -60,6 +166,10 @@ extension AIClient {
     /// Use this method to display text to the user as it arrives, rather than
     /// waiting for the entire response. The returned stream yields
     /// ``ChatCompletionChunk`` values until the server closes the connection.
+    ///
+    /// When the model invokes a tool, chunks carry ``ChatCompletionChunk/toolCallDeltas``
+    /// instead of ``ChatCompletionChunk/text``. Concatenate `function.arguments` across
+    /// all chunks sharing the same `index` to reconstruct each full tool call.
     ///
     /// ```swift
     /// let stream = await client.ai.chatCompletionStream(
@@ -194,10 +304,9 @@ extension AIClient {
                         }
 
                         // ── Parse SSE events ─────────────────────────────────
-                        // SSE spec: an event can span multiple "data:" lines.
-                        // Lines are buffered until a blank line signals the end
-                        // of the event. The buffered data lines are then joined
-                        // with newlines and decoded as a single JSON payload.
+                        // SSE spec: an event can span multiple "data:" lines,
+                        // terminated by a blank line. Lines are buffered until
+                        // a blank line (or EOF) triggers a flush.
                         var dataBuffer: [String] = []
                         var receivedTerminal = false
 
@@ -210,38 +319,25 @@ extension AIClient {
                             // Blank line = end of SSE event; flush the buffer.
                             guard line.isEmpty, !dataBuffer.isEmpty else { continue }
 
-                            let payload = dataBuffer.joined(separator: "\n")
+                            if flushBuffer(dataBuffer, into: continuation) {
+                                receivedTerminal = true
+                            }
                             dataBuffer.removeAll()
 
-                            // End-of-stream sentinel
-                            if payload == "[DONE]" {
-                                receivedTerminal = true
-                                continuation.yield(ChatCompletionChunk(text: "", isFinished: true))
-                                break
-                            }
-
-                            // Decode the JSON chunk; skip payloads that don't parse.
-                            guard let chunkData = payload.data(using: .utf8),
-                                  let sseChunk = try? JSONDecoder().decode(SSEChunk.self, from: chunkData)
-                            else { continue }
-
-                            let deltaText = sseChunk.choices.first?.delta.content ?? ""
-                            let isFinished = sseChunk.choices.first?.finishReason != nil
-
-                            continuation.yield(ChatCompletionChunk(
-                                text: deltaText,
-                                isFinished: isFinished,
-                                model: sseChunk.model
-                            ))
-
-                            if isFinished {
-                                receivedTerminal = true
-                                break
-                            }
+                            if receivedTerminal { break }
                         }
 
-                        // If the byte stream ended without a terminal signal
-                        // the response was truncated (server/proxy/network drop).
+                        // ── EOF flush ─────────────────────────────────────────
+                        // Some servers close the connection after the final
+                        // data: line without sending a trailing blank line.
+                        // Dispatch any remaining buffered data before deciding
+                        // whether the stream was truncated.
+                        if !receivedTerminal, !dataBuffer.isEmpty {
+                            receivedTerminal = flushBuffer(dataBuffer, into: continuation)
+                        }
+
+                        // If no terminal signal was received the stream was
+                        // truncated (server/proxy/network drop mid-response).
                         if receivedTerminal {
                             continuation.finish()
                         } else {
