@@ -125,7 +125,10 @@ internal struct ReconnectRuntimeState: Sendable {
     var networkAvailability: NetworkAvailability = .unknown
     var isManuallyDisconnected: Bool = false
 
-    mutating func prepareForConnectionRequest() {
+    mutating func prepareForConnectionRequest(resetRetryAttempt: Bool) {
+        if resetRetryAttempt {
+            retryAttempt = 0
+        }
         shouldMaintainConnection = true
         isManuallyDisconnected = false
     }
@@ -442,6 +445,10 @@ public final class RealtimeClient: @unchecked Sendable {
 
     /// Connect to the realtime server
     public func connect() async throws {
+        try await connect(resetRetryBudget: true)
+    }
+
+    private func connect(resetRetryBudget: Bool) async throws {
         // Already connected
         if currentSocketStatus() == .connected {
             logger.debug("Already connected, skipping connect()")
@@ -451,7 +458,7 @@ public final class RealtimeClient: @unchecked Sendable {
         cancelReconnectTask()
 
         let invocation = reconnectCoordinator.withValue { coordinator -> (task: Task<Void, Error>, token: UUID, isOwner: Bool) in
-            coordinator.runtime.prepareForConnectionRequest()
+            coordinator.runtime.prepareForConnectionRequest(resetRetryAttempt: resetRetryBudget)
 
             if let existingTask = coordinator.connectTask,
                let existingToken = coordinator.connectTaskToken {
@@ -820,64 +827,84 @@ public final class RealtimeClient: @unchecked Sendable {
         logDebug("Connecting to: \(url.absoluteString)")
         logTrace("Auth token: \(String(authToken.prefix(20)))...")
 
-        try await withCheckedThrowingContinuation { [weak self] (continuation: CheckedContinuation<Void, Error>) in
-            guard let self = self else {
-                continuation.resume(throwing: CancellationError())
-                return
-            }
-
-            struct ConnectAttemptCompletionState {
-                var completed = false
-                var connectHandlerId: UUID?
-                var errorHandlerId: UUID?
-            }
-            let completionState = LockIsolated(ConnectAttemptCompletionState())
-
-            func complete(with result: Result<Void, Error>) {
-                let handlerIds = completionState.withValue { state -> (UUID?, UUID?)? in
-                    guard !state.completed else { return nil }
-                    state.completed = true
-                    return (state.connectHandlerId, state.errorHandlerId)
+        let cancellationHook = LockIsolated<(() -> Void)?>(nil)
+        try await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation { [weak self] (continuation: CheckedContinuation<Void, Error>) in
+                guard let self = self else {
+                    continuation.resume(throwing: CancellationError())
+                    return
                 }
 
-                guard let handlerIds else { return }
+                struct ConnectAttemptCompletionState {
+                    var completed = false
+                    var connectHandlerId: UUID?
+                    var errorHandlerId: UUID?
+                }
+                let completionState = LockIsolated(ConnectAttemptCompletionState())
 
-                if let connectHandlerId = handlerIds.0 {
-                    socket.off(id: connectHandlerId)
+                func complete(with result: Result<Void, Error>) {
+                    let handlerIds = completionState.withValue { state -> (UUID?, UUID?)? in
+                        guard !state.completed else { return nil }
+                        state.completed = true
+                        return (state.connectHandlerId, state.errorHandlerId)
+                    }
+
+                    guard let handlerIds else { return }
+                    cancellationHook.setValue(nil)
+
+                    if let connectHandlerId = handlerIds.0 {
+                        socket.off(id: connectHandlerId)
+                    }
+
+                    if let errorHandlerId = handlerIds.1 {
+                        socket.off(id: errorHandlerId)
+                    }
+
+                    switch result {
+                    case .success:
+                        continuation.resume()
+                    case .failure(let error):
+                        continuation.resume(throwing: error)
+                    }
                 }
 
-                if let errorHandlerId = handlerIds.1 {
-                    socket.off(id: errorHandlerId)
+                let connectHandlerId = socket.on(clientEvent: .connect) { _, _ in
+                    complete(with: .success(()))
+                }
+                completionState.withValue { $0.connectHandlerId = connectHandlerId }
+
+                let errorHandlerId = socket.on(clientEvent: .error) { data, _ in
+                    complete(with: .failure(Self.connectionError(from: data)))
+                }
+                completionState.withValue { $0.errorHandlerId = errorHandlerId }
+
+                cancellationHook.setValue {
+                    complete(with: .failure(CancellationError()))
                 }
 
-                switch result {
-                case .success:
-                    continuation.resume()
-                case .failure(let error):
-                    continuation.resume(throwing: error)
+                if Task.isCancelled {
+                    complete(with: .failure(CancellationError()))
+                    return
+                }
+
+                socket.connect(withPayload: authPayload, timeoutAfter: self.connectionTimeout) {
+                    complete(with: .failure(
+                        NSError(
+                            domain: self.reconnectErrorDomain,
+                            code: -1001,
+                            userInfo: [NSLocalizedDescriptionKey: "Connection timed out after \(Int(self.connectionTimeout)) seconds."]
+                        )
+                    ))
                 }
             }
-
-            let connectHandlerId = socket.on(clientEvent: .connect) { _, _ in
-                complete(with: .success(()))
+        }, onCancel: {
+            let hook = cancellationHook.withValue { hook -> (() -> Void)? in
+                let activeHook = hook
+                hook = nil
+                return activeHook
             }
-            completionState.withValue { $0.connectHandlerId = connectHandlerId }
-
-            let errorHandlerId = socket.on(clientEvent: .error) { data, _ in
-                complete(with: .failure(Self.connectionError(from: data)))
-            }
-            completionState.withValue { $0.errorHandlerId = errorHandlerId }
-
-            socket.connect(withPayload: authPayload, timeoutAfter: self.connectionTimeout) {
-                complete(with: .failure(
-                    NSError(
-                        domain: self.reconnectErrorDomain,
-                        code: -1001,
-                        userInfo: [NSLocalizedDescriptionKey: "Connection timed out after \(Int(self.connectionTimeout)) seconds."]
-                    )
-                ))
-            }
-        }
+            hook?()
+        })
     }
 
     private func ensureSocketInitialized() throws -> SocketIOClient {
@@ -993,7 +1020,7 @@ public final class RealtimeClient: @unchecked Sendable {
                 self.clearReconnectTaskIfNeeded(token: reservation.token)
 
                 do {
-                    try await self.connect()
+                    try await self.connect(resetRetryBudget: false)
                 } catch {
                     guard !(error is CancellationError) else { return }
                     self.logError("Reconnect attempt \(reservation.attempt) failed: \(error.localizedDescription)")

@@ -28,7 +28,7 @@ final class InsForgeRealtimeReconnectTests: XCTestCase {
     func testReconnectDecisionStopsAtMaxAttempts() {
         let policy = ReconnectPolicy.default
         var state = ReconnectRuntimeState()
-        state.prepareForConnectionRequest()
+        state.prepareForConnectionRequest(resetRetryAttempt: false)
 
         for attempt in 1...policy.maxAttempts {
             let decision = state.nextReconnectDecision(
@@ -60,7 +60,7 @@ final class InsForgeRealtimeReconnectTests: XCTestCase {
     func testReconnectDecisionBlockedWhenNetworkUnavailable() {
         let policy = ReconnectPolicy.default
         var state = ReconnectRuntimeState()
-        state.prepareForConnectionRequest()
+        state.prepareForConnectionRequest(resetRetryAttempt: false)
         _ = state.applyNetworkAvailability(.unavailable)
 
         let decision = state.nextReconnectDecision(
@@ -76,7 +76,7 @@ final class InsForgeRealtimeReconnectTests: XCTestCase {
     func testReconnectDecisionAllowedWhenNetworkAvailabilityIsUnknown() {
         let policy = ReconnectPolicy.default
         var state = ReconnectRuntimeState()
-        state.prepareForConnectionRequest()
+        state.prepareForConnectionRequest(resetRetryAttempt: false)
 
         let decision = state.nextReconnectDecision(
             policy: policy,
@@ -96,7 +96,7 @@ final class InsForgeRealtimeReconnectTests: XCTestCase {
     func testReconnectDecisionResumesAfterNetworkBecomesAvailable() {
         let policy = ReconnectPolicy.default
         var state = ReconnectRuntimeState()
-        state.prepareForConnectionRequest()
+        state.prepareForConnectionRequest(resetRetryAttempt: false)
 
         _ = state.applyNetworkAvailability(.unavailable)
         let blockedDecision = state.nextReconnectDecision(
@@ -128,7 +128,7 @@ final class InsForgeRealtimeReconnectTests: XCTestCase {
     func testManualDisconnectPreventsReconnect() {
         let policy = ReconnectPolicy.default
         var state = ReconnectRuntimeState()
-        state.prepareForConnectionRequest()
+        state.prepareForConnectionRequest(resetRetryAttempt: false)
         state.markManualDisconnect()
 
         let decision = state.nextReconnectDecision(
@@ -146,7 +146,7 @@ final class InsForgeRealtimeReconnectTests: XCTestCase {
     func testSuccessfulConnectResetsRetryAttempt() {
         let policy = ReconnectPolicy.default
         var state = ReconnectRuntimeState()
-        state.prepareForConnectionRequest()
+        state.prepareForConnectionRequest(resetRetryAttempt: false)
 
         _ = state.nextReconnectDecision(
             policy: policy,
@@ -173,7 +173,7 @@ final class InsForgeRealtimeReconnectTests: XCTestCase {
     func testReconnectDecisionIsSuppressedWhenReconnectTaskIsPending() {
         let policy = ReconnectPolicy.default
         var state = ReconnectRuntimeState()
-        state.prepareForConnectionRequest()
+        state.prepareForConnectionRequest(resetRetryAttempt: false)
 
         let decision = state.nextReconnectDecision(
             policy: policy,
@@ -189,7 +189,7 @@ final class InsForgeRealtimeReconnectTests: XCTestCase {
     func testUnknownToAvailableTransitionDoesNotResetRetryAttempt() {
         let policy = ReconnectPolicy.default
         var state = ReconnectRuntimeState()
-        state.prepareForConnectionRequest()
+        state.prepareForConnectionRequest(resetRetryAttempt: false)
 
         _ = state.nextReconnectDecision(
             policy: policy,
@@ -215,7 +215,7 @@ final class InsForgeRealtimeReconnectTests: XCTestCase {
     func testRetryAttemptResetsWhenNetworkIsRestored() {
         let policy = ReconnectPolicy.default
         var state = ReconnectRuntimeState()
-        state.prepareForConnectionRequest()
+        state.prepareForConnectionRequest(resetRetryAttempt: false)
 
         _ = state.nextReconnectDecision(
             policy: policy,
@@ -253,6 +253,79 @@ final class InsForgeRealtimeReconnectTests: XCTestCase {
             XCTAssertEqual(attempt, 1)
         } else {
             XCTFail("Expected reconnect attempt counter to restart after network recovery")
+        }
+    }
+
+    func testPrepareForConnectionRequestWithResetStartsNewRetryCycle() {
+        let policy = ReconnectPolicy.default
+        var state = ReconnectRuntimeState()
+        state.prepareForConnectionRequest(resetRetryAttempt: false)
+
+        for _ in 1...policy.maxAttempts {
+            _ = state.nextReconnectDecision(
+                policy: policy,
+                hasPendingReconnectTask: false,
+                hasActiveConnectTask: false,
+                isSocketConnected: false
+            )
+        }
+
+        let exhaustedDecision = state.nextReconnectDecision(
+            policy: policy,
+            hasPendingReconnectTask: false,
+            hasActiveConnectTask: false,
+            isSocketConnected: false
+        )
+        XCTAssertEqual(exhaustedDecision, .maxedOut)
+
+        state.prepareForConnectionRequest(resetRetryAttempt: true)
+
+        let resumedDecision = state.nextReconnectDecision(
+            policy: policy,
+            hasPendingReconnectTask: false,
+            hasActiveConnectTask: false,
+            isSocketConnected: false
+        )
+
+        if case .schedule(let attempt, _) = resumedDecision {
+            XCTAssertEqual(attempt, 1)
+        } else {
+            XCTFail("Expected retry cycle to restart after resetRetryAttempt=true")
+        }
+    }
+
+    func testPrepareForConnectionRequestWithoutResetPreservesRetryBudget() {
+        let policy = ReconnectPolicy.default
+        var state = ReconnectRuntimeState()
+        state.prepareForConnectionRequest(resetRetryAttempt: false)
+
+        _ = state.nextReconnectDecision(
+            policy: policy,
+            hasPendingReconnectTask: false,
+            hasActiveConnectTask: false,
+            isSocketConnected: false
+        )
+        _ = state.nextReconnectDecision(
+            policy: policy,
+            hasPendingReconnectTask: false,
+            hasActiveConnectTask: false,
+            isSocketConnected: false
+        )
+        XCTAssertEqual(state.retryAttempt, 2)
+
+        state.prepareForConnectionRequest(resetRetryAttempt: false)
+
+        let nextDecision = state.nextReconnectDecision(
+            policy: policy,
+            hasPendingReconnectTask: false,
+            hasActiveConnectTask: false,
+            isSocketConnected: false
+        )
+
+        if case .schedule(let attempt, _) = nextDecision {
+            XCTAssertEqual(attempt, 3)
+        } else {
+            XCTFail("Expected retry counter to continue when resetRetryAttempt=false")
         }
     }
 }
