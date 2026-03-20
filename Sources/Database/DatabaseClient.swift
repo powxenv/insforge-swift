@@ -616,7 +616,9 @@ public struct QueryBuilder: Sendable {
             let response = try await executeRequest(
                 .get,
                 url: requestURL,
-                headers: requestHeaders
+                headers: requestHeaders,
+                httpClient: httpClient,
+                tokenRefreshHandler: tokenRefreshHandler
             )
 
             logger.debug("Response: \(response.response.statusCode)")
@@ -661,8 +663,8 @@ public struct QueryBuilder: Sendable {
             url: requestURL,
             headers: requestHeaders,
             body: data,
-            httpClient: builder.httpClient,
-            tokenRefreshHandler: builder.tokenRefreshHandler
+            httpClient: httpClient,
+            tokenRefreshHandler: tokenRefreshHandler
         )
 
         let statusCode = response.response.statusCode
@@ -722,7 +724,9 @@ public struct QueryBuilder: Sendable {
             .post,
             url: requestURL,
             headers: requestHeaders,
-            body: data
+            body: data,
+            httpClient: httpClient,
+            tokenRefreshHandler: tokenRefreshHandler
         )
 
         let statusCode = response.response.statusCode
